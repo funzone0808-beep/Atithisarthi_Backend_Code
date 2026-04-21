@@ -66,9 +66,21 @@ const testimonialSubmissionSchema = z.object({
   stars: z.number().int().min(1).max(5)
 });
 
+const contactSubmissionSchema = z.object({
+  hotelName: z.string().trim().min(1).max(150),
+  hotelSlug: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(2).max(150),
+  email: z.string().trim().email().max(320),
+  subject: z.string().trim().max(200).optional().nullable(),
+  message: z.string().trim().min(2).max(4000),
+  googleSheetStatus: z.string().trim().max(40).optional().nullable(),
+  googleSheetResponse: z.record(z.string(), z.any()).optional().nullable()
+});
+
 module.exports = {
   orderSchema,
   inquirySchema,
   reservationSchema,
-  testimonialSubmissionSchema
+  testimonialSubmissionSchema,
+  contactSubmissionSchema
 };

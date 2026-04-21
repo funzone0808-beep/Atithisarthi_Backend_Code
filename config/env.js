@@ -20,8 +20,8 @@ const env = {
   jwtSecret: getRequiredEnv("JWT_SECRET"),
   jwtExpiresIn: getEnv("JWT_EXPIRES_IN", "7d"),
 
-  frontendUrl: getEnv("FRONTEND_URL", "https://my-projectfrontend.funzone0808.workers.dev"),
-  adminUrl: getEnv("ADMIN_URL", "https://my-projectfrontend.funzone0808.workers.dev"),
+  frontendUrl: getEnv("FRONTEND_URL", " "),
+  adminUrl: getEnv("ADMIN_URL", " "),
   notificationDeliveryEnabled:
     getEnv("NOTIFICATION_DELIVERY_ENABLED", "false") === "true",
   notificationDeliveryChannel: getEnv("NOTIFICATION_DELIVERY_CHANNEL", "internal"),
@@ -33,6 +33,17 @@ const env = {
     getEnv("NOTIFICATION_SMTP_SECURE", "false") === "true",
   notificationSmtpUser: getEnv("NOTIFICATION_SMTP_USER", ""),
   notificationSmtpPass: getEnv("NOTIFICATION_SMTP_PASS", ""),
+
+  paymentGatewayEnabled:
+    getEnv("PAYMENT_GATEWAY_ENABLED", "false") === "true",
+  paymentGatewayProvider: getEnv("PAYMENT_GATEWAY_PROVIDER", "razorpay"),
+  paymentGatewayCurrency: getEnv("PAYMENT_GATEWAY_CURRENCY", "INR"),
+  paymentRouteTransfersEnabled:
+    getEnv("PAYMENT_ROUTE_TRANSFERS_ENABLED", "false") === "true",
+  razorpayKeyId: getEnv("RAZORPAY_KEY_ID", ""),
+  razorpayKeySecret: getEnv("RAZORPAY_KEY_SECRET", ""),
+  razorpayWebhookSecret: getEnv("RAZORPAY_WEBHOOK_SECRET", ""),
+  razorpayApiBaseUrl: getEnv("RAZORPAY_API_BASE_URL", "https://api.razorpay.com/v1"),
 
   isProduction: getEnv("NODE_ENV", "development") === "production",
   isDevelopment: getEnv("NODE_ENV", "development") === "development"

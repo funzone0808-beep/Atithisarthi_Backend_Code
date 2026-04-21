@@ -58,6 +58,80 @@ const hotelThemeSchema = z
       })
       .passthrough()
       .optional(),
+    payment: z
+      .object({
+        upiDiscountPercent: z.number().min(0).max(100).optional()
+      })
+      .passthrough()
+      .optional(),
+    content: z
+      .object({
+        navLabels: z
+          .object({
+            about: z.string().trim().max(80).optional(),
+            menu: z.string().trim().max(80).optional(),
+            gallery: z.string().trim().max(80).optional(),
+            events: z.string().trim().max(80).optional(),
+            testimonials: z.string().trim().max(80).optional(),
+            contact: z.string().trim().max(80).optional(),
+            reservation: z.string().trim().max(80).optional()
+          })
+          .passthrough()
+          .optional(),
+        menuCategories: z
+          .object({
+            starters: z.string().trim().max(80).optional(),
+            mains: z.string().trim().max(80).optional(),
+            desserts: z.string().trim().max(80).optional(),
+            drinks: z.string().trim().max(80).optional()
+          })
+          .passthrough()
+          .optional(),
+        menuSection: z
+          .object({
+            eyebrow: z.string().trim().max(320).optional(),
+            title: z.string().trim().max(320).optional(),
+            subtitle: z.string().trim().max(320).optional(),
+            fullEyebrow: z.string().trim().max(320).optional(),
+            fullTitle: z.string().trim().max(320).optional(),
+            fullSubtitle: z.string().trim().max(320).optional(),
+            viewFullMenu: z.string().trim().max(320).optional()
+          })
+          .passthrough()
+          .optional(),
+        ctaLabels: z
+          .object({
+            heroPrimary: z.string().trim().max(160).optional(),
+            heroReservation: z.string().trim().max(160).optional(),
+            aboutReservation: z.string().trim().max(160).optional(),
+            cartButton: z.string().trim().max(160).optional(),
+            menuScrollHint: z.string().trim().max(160).optional(),
+            loadMore: z.string().trim().max(160).optional(),
+            loadMoreHint: z.string().trim().max(160).optional()
+          })
+          .passthrough()
+          .optional(),
+        footerLabels: z
+          .object({
+            exploreHeading: z.string().trim().max(160).optional(),
+            about: z.string().trim().max(160).optional(),
+            menu: z.string().trim().max(160).optional(),
+            gallery: z.string().trim().max(160).optional(),
+            events: z.string().trim().max(160).optional(),
+            reviews: z.string().trim().max(160).optional(),
+            reservationsHeading: z.string().trim().max(160).optional(),
+            bookTable: z.string().trim().max(160).optional(),
+            privateDining: z.string().trim().max(160).optional(),
+            contact: z.string().trim().max(160).optional(),
+            openingHoursHeading: z.string().trim().max(160).optional(),
+            findUsHeading: z.string().trim().max(160).optional(),
+            copyrightSuffix: z.string().trim().max(160).optional()
+          })
+          .passthrough()
+          .optional()
+      })
+      .passthrough()
+      .optional(),
     sections: z
       .object({
         about: z.boolean().optional(),
@@ -141,6 +215,38 @@ const hotelNotificationSettingsSchema = z.object({
   notifyOnNewInquiry: z.boolean().optional()
 });
 
+const hotelPaymentRouteSettingsSchema = z
+  .object({
+    hotelSlug: z.string().trim().min(2).max(120),
+    provider: z.enum(["razorpay"]).optional(),
+    routeEnabled: z.boolean().optional(),
+    razorpayLinkedAccountId: z
+      .string()
+      .trim()
+      .max(120)
+      .optional()
+      .nullable()
+  })
+  .superRefine((data, ctx) => {
+    const linkedAccountId = String(data.razorpayLinkedAccountId || "").trim();
+
+    if (linkedAccountId && !/^acc_[A-Za-z0-9]+$/.test(linkedAccountId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Razorpay linked account id must look like acc_xxxxx",
+        path: ["razorpayLinkedAccountId"]
+      });
+    }
+
+    if (data.routeEnabled && !linkedAccountId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Razorpay linked account id is required when Route is enabled",
+        path: ["razorpayLinkedAccountId"]
+      });
+    }
+  });
+
 const hotelProfileSchema = z.object({
   hotelSlug: z.string().trim().min(2).max(120),
   hotelName: z.string().trim().min(2).max(150),
@@ -173,6 +279,7 @@ module.exports = {
   partialHotelSchema,
   galleryItemSchema,
   partialGalleryItemSchema,
+  hotelPaymentRouteSettingsSchema,
   hotelNotificationSettingsSchema,
   menuItemSchema,
   partialMenuItemSchema,

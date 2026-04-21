@@ -7,7 +7,16 @@
     "start": "node server.js",
     "dev": "node server.js",
     "verify:qr-link": "node scripts/verify-qr-table-link.js",
-    "verify:billing-schema": "node scripts/verify-order-billing-columns.js"
+    "verify:billing-schema": "node scripts/verify-order-billing-columns.js",
+    "verify:payment-gateway-schema": "node scripts/verify-order-payment-gateway-columns.js",
+    "verify:payment-gateway-config": "node scripts/verify-payment-gateway-config.js",
+    "verify:payment-gateway-readiness": "node scripts/verify-payment-gateway-readiness.js",
+    "verify:payment-route-hotel": "node scripts/verify-payment-route-hotel-readiness.js",
+    "verify:payment-webhook-local": "node scripts/verify-payment-webhook-local.js",
+    "verify:production-config": "node scripts/verify-production-config.js",
+    "verify:dine-in-billing": "node scripts/verify-dine-in-billing-flow.js",
+    "verify:staff-access": "node scripts/verify-staff-access-schema.js",
+    "verify:staff-billing": "node scripts/verify-staff-billing-flow.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",

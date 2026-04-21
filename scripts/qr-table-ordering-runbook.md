@@ -8,20 +8,20 @@ Open the admin dashboard and use **QR Table Link**.
 
 Use:
 
-- Hotel slug: the tenant slug, for example `hotel-sai-raj`
+- Hotel slug: the tenant slug, for example `hotel-example`
 - Table number: the printed table label, for example `T5`
 - Landing page: `Full Menu Page`
 
 Expected URL shape:
 
 ```text
-menu.html?hotel=hotel-sai-raj&table=T5&source=qr
+menu.html?hotel=hotel-example&table=T5&source=qr
 ```
 
 If you choose the homepage landing page, it must include `#menu`:
 
 ```text
-index.html?hotel=hotel-sai-raj&table=T5&source=qr#menu
+index.html?hotel=hotel-example&table=T5&source=qr#menu
 ```
 
 ## 2. Verify the link
@@ -29,7 +29,7 @@ index.html?hotel=hotel-sai-raj&table=T5&source=qr#menu
 From `backend`, run:
 
 ```powershell
-npm run verify:qr-link -- "menu.html?hotel=hotel-sai-raj&table=T5&source=qr"
+npm run verify:qr-link -- "menu.html?hotel=hotel-example&table=T5&source=qr"
 ```
 
 The verifier should print the hotel, table, source, and page.

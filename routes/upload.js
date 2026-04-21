@@ -6,30 +6,139 @@ const { requireAdminAuth } = require("../middleware/require-admin-auth");
 
 const router = express.Router();
 
+const ALLOWED_IMAGE_TYPES = new Map([
+  [
+    "image/jpeg",
+    {
+      defaultExt: ".jpg",
+      extensions: [".jpg", ".jpeg"],
+      isValidBuffer: (buffer) =>
+        buffer.length >= 3 &&
+        buffer[0] === 0xff &&
+        buffer[1] === 0xd8 &&
+        buffer[2] === 0xff
+    }
+  ],
+  [
+    "image/png",
+    {
+      defaultExt: ".png",
+      extensions: [".png"],
+      isValidBuffer: (buffer) =>
+        buffer.length >= 8 &&
+        buffer[0] === 0x89 &&
+        buffer[1] === 0x50 &&
+        buffer[2] === 0x4e &&
+        buffer[3] === 0x47 &&
+        buffer[4] === 0x0d &&
+        buffer[5] === 0x0a &&
+        buffer[6] === 0x1a &&
+        buffer[7] === 0x0a
+    }
+  ],
+  [
+    "image/webp",
+    {
+      defaultExt: ".webp",
+      extensions: [".webp"],
+      isValidBuffer: (buffer) =>
+        buffer.length >= 12 &&
+        buffer.toString("ascii", 0, 4) === "RIFF" &&
+        buffer.toString("ascii", 8, 12) === "WEBP"
+    }
+  ],
+  [
+    "image/avif",
+    {
+      defaultExt: ".avif",
+      extensions: [".avif"],
+      isValidBuffer: (buffer) =>
+        buffer.length >= 16 &&
+        buffer.toString("ascii", 4, 8) === "ftyp" &&
+        ["avif", "avis"].some((brand) => buffer.toString("ascii", 8, 16).includes(brand))
+    }
+  ]
+]);
+const ALLOWED_IMAGE_TYPE_LABEL = "JPG, PNG, WebP, or AVIF";
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024
   },
   fileFilter(req, file, cb) {
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("Only image uploads are allowed"));
+    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+      return cb(new Error(`Only ${ALLOWED_IMAGE_TYPE_LABEL} uploads are allowed`));
     }
+
     cb(null, true);
   }
 });
 
-function sanitizeFileName(name = "") {
-  return String(name)
+function handleImageUpload(req, res, next) {
+  upload.single("file")(req, res, (error) => {
+    if (!error) {
+      return next();
+    }
+
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "Image file must be 5 MB or smaller"
+      : error.message || `Only ${ALLOWED_IMAGE_TYPE_LABEL} uploads are allowed`;
+
+    return res.status(400).json({
+      success: false,
+      message
+    });
+  });
+}
+
+function sanitizeStorageSegment(value = "", fallback = "misc") {
+  const sanitized = String(value || "")
     .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return sanitized || fallback;
+}
+
+function sanitizeFileName(name = "") {
+  const sanitized = String(name)
+    .toLowerCase()
+    .trim()
     .replace(/[^a-z0-9.\-_]/g, "-")
-    .replace(/-+/g, "-");
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return sanitized || "image";
+}
+
+function getSafeImageExtension(file) {
+  const imageConfig = ALLOWED_IMAGE_TYPES.get(file.mimetype);
+  const originalExt = path.extname(file.originalname || "").toLowerCase();
+
+  if (imageConfig?.extensions.includes(originalExt)) {
+    return originalExt;
+  }
+
+  return imageConfig?.defaultExt || ".img";
+}
+
+function isValidImageUpload(file) {
+  const imageConfig = ALLOWED_IMAGE_TYPES.get(file?.mimetype || "");
+
+  if (!imageConfig || !Buffer.isBuffer(file?.buffer)) {
+    return false;
+  }
+
+  return imageConfig.isValidBuffer(file.buffer);
 }
 
 router.post(
   "/",
   requireAdminAuth,
-  upload.single("file"),
+  handleImageUpload,
   async (req, res) => {
     try {
       const file = req.file;
@@ -43,11 +152,20 @@ router.post(
         });
       }
 
-      const ext = path.extname(file.originalname || "").toLowerCase();
+      if (!isValidImageUpload(file)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid image file. Please upload a valid ${ALLOWED_IMAGE_TYPE_LABEL} file.`
+        });
+      }
+
+      const safeHotelSlug = sanitizeStorageSegment(hotelSlug, "shared");
+      const safeFolder = sanitizeStorageSegment(folder, "misc");
+      const ext = getSafeImageExtension(file);
       const baseName = path.basename(file.originalname || "file", ext);
       const safeName = sanitizeFileName(baseName);
       const uniqueName = `${Date.now()}-${safeName}${ext}`;
-      const storagePath = `${hotelSlug}/${folder}/${uniqueName}`;
+      const storagePath = `${safeHotelSlug}/${safeFolder}/${uniqueName}`;
 
       const { error: uploadError } = await supabase.storage
         .from("hotel-assets")

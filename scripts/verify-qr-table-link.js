@@ -1,5 +1,5 @@
 function usage() {
-  console.log("Usage: node scripts/verify-qr-table-link.js \"menu.html?hotel=hotel-sai-raj&table=T5&source=qr\"");
+  console.log("Usage: node scripts/verify-qr-table-link.js \"menu.html?hotel=hotel-example&table=T5&source=qr\"");
 }
 
 function normalizeValue(value = "") {

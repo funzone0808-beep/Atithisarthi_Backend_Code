@@ -3,6 +3,64 @@ const { supabase } = require("../utils/supabase");
 
 const router = express.Router();
 
+const PUBLIC_HOTEL_PROFILE_FIELDS = [
+  "hotel_slug",
+  "hotel_name",
+  "tagline",
+  "owner_whatsapp_number",
+  "owner_upi_id",
+  "gst_percent",
+  "contact",
+  "branding",
+  "theme",
+  "hero",
+  "about",
+  "features",
+  "events",
+  "reservation",
+  "contact_section",
+  "location",
+  "footer",
+  "social"
+].join(",");
+
+const PUBLIC_MENU_FIELDS = [
+  "item_id",
+  "name",
+  "description",
+  "price",
+  "image",
+  "alt",
+  "badge",
+  "tag",
+  "category",
+  "sort_order"
+].join(",");
+
+const PUBLIC_GALLERY_FIELDS = [
+  "id",
+  "image_url",
+  "storage_path",
+  "alt",
+  "layout_variant",
+  "sort_order"
+].join(",");
+
+const PUBLIC_TESTIMONIAL_FIELDS = [
+  "id",
+  "hotel_slug",
+  "guest_name",
+  "guest_role",
+  "review_text",
+  "star_rating",
+  "avatar_url",
+  "sort_order",
+  "created_at",
+  "is_archived",
+  "is_active",
+  "is_approved"
+].join(",");
+
 function isMissingTestimonialsRelationError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
   const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
@@ -25,7 +83,7 @@ router.get("/hotel/:slug", async (req, res) => {
 
     const { data, error } = await supabase
       .from("hotel_profiles")
-      .select("*")
+      .select(PUBLIC_HOTEL_PROFILE_FIELDS)
       .eq("hotel_slug", slug)
       .maybeSingle();
 
@@ -57,7 +115,7 @@ router.get("/menu/:slug", async (req, res) => {
 
     const { data, error } = await supabase
       .from("menu_items")
-      .select("*")
+      .select(PUBLIC_MENU_FIELDS)
       .eq("hotel_slug", slug)
       .eq("is_available", true)
       .eq("is_archived", false)
@@ -106,7 +164,7 @@ router.get("/gallery/:slug", async (req, res) => {
 
     const { data, error } = await supabase
       .from("gallery_items")
-      .select("*")
+      .select(PUBLIC_GALLERY_FIELDS)
       .eq("hotel_slug", slug)
       .eq("is_active", true)
       .eq("is_archived", false)
@@ -141,7 +199,7 @@ router.get("/testimonials/:slug", async (req, res) => {
 
     const { data, error } = await supabase
       .from("testimonials")
-      .select("*")
+      .select(PUBLIC_TESTIMONIAL_FIELDS)
       .eq("hotel_slug", slug);
 
     if (error) {

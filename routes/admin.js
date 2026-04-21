@@ -9,6 +9,7 @@ const { validateBody } = require("../validators/common");
 const {
   galleryItemSchema,
   hotelSchema,
+  hotelPaymentRouteSettingsSchema,
   hotelNotificationSettingsSchema,
   menuItemSchema,
   partialGalleryItemSchema,
@@ -20,6 +21,12 @@ const {
 const NOTIFICATION_EVENT_SOURCE_TYPES = ["order", "reservation", "inquiry"];
 const NOTIFICATION_EVENT_STATUSES = ["pending", "sent", "failed", "skipped"];
 const NOTIFICATION_EVENT_MAX_RETRIES = 3;
+const ORDER_STATUSES = ["new", "confirmed", "preparing", "completed", "cancelled"];
+const RESERVATION_STATUSES = ["new", "confirmed", "seated", "completed", "cancelled"];
+const INQUIRY_STATUSES = ["new", "contacted", "converted", "closed"];
+const CONTACT_SUBMISSION_STATUSES = ["new", "contacted", "resolved", "closed", "archived"];
+const ORDER_BILLING_STATUSES = ["not_billed", "billed", "cancelled"];
+const ORDER_PAYMENT_STATUSES = ["unpaid", "customer_confirmed", "paid", "refunded"];
 
 function isMissingTestimonialsRelationError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
@@ -37,6 +44,22 @@ function isMissingTestimonialsRelationError(error) {
   );
 }
 
+function isMissingContactSubmissionsRelationError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    (details.includes("contact_submissions") &&
+      (details.includes("relation") ||
+        details.includes("schema cache") ||
+        details.includes("could not find")))
+  );
+}
+
 function getNotificationEventsLimit(value) {
   const parsedValue = Number.parseInt(String(value || "").trim(), 10);
 
@@ -45,6 +68,119 @@ function getNotificationEventsLimit(value) {
   }
 
   return Math.min(parsedValue, 200);
+}
+
+function normalizeStatusValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getAllowedStatus(value, allowedStatuses = []) {
+  const normalizedStatus = normalizeStatusValue(value);
+  return allowedStatuses.includes(normalizedStatus) ? normalizedStatus : "";
+}
+
+function normalizeBillNumberPart(value, fallback = "ORDER", maxLength = 18) {
+  const normalizedValue = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return (normalizedValue || fallback).slice(0, maxLength);
+}
+
+function buildOrderBillNumber(order = {}, billedAt = new Date().toISOString()) {
+  const hotelPart = normalizeBillNumberPart(
+    order.hotel_slug || order.hotel_name,
+    "HOTEL",
+    18
+  );
+  const datePart = String(billedAt || new Date().toISOString())
+    .slice(0, 10)
+    .replace(/[^0-9]/g, "");
+  const orderIdPart = String(order.id || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(-8);
+
+  return [
+    "BILL",
+    hotelPart,
+    datePart || "DATE",
+    orderIdPart || "ORDER"
+  ].join("-");
+}
+
+function buildOrderBillingUpdatePayload(body = {}) {
+  const updatePayload = {};
+  const updatedAt = new Date().toISOString();
+
+  if (body.billingStatus !== undefined) {
+    const billingStatus = normalizeStatusValue(body.billingStatus);
+
+    if (!ORDER_BILLING_STATUSES.includes(billingStatus)) {
+      return {
+        error: `Billing status must be one of: ${ORDER_BILLING_STATUSES.join(", ")}`
+      };
+    }
+
+    updatePayload.billing_status = billingStatus;
+
+    if (billingStatus === "billed") {
+      updatePayload.billed_at = updatedAt;
+    } else if (billingStatus === "not_billed") {
+      updatePayload.billed_at = null;
+    }
+  }
+
+  if (body.paymentStatus !== undefined) {
+    const paymentStatus = normalizeStatusValue(body.paymentStatus);
+
+    if (!ORDER_PAYMENT_STATUSES.includes(paymentStatus)) {
+      return {
+        error: `Payment status must be one of: ${ORDER_PAYMENT_STATUSES.join(", ")}`
+      };
+    }
+
+    updatePayload.payment_status = paymentStatus;
+
+    if (paymentStatus === "paid") {
+      updatePayload.paid_at = updatedAt;
+    } else if (paymentStatus === "unpaid") {
+      updatePayload.paid_at = null;
+    }
+  }
+
+  if (!Object.keys(updatePayload).length) {
+    return {
+      error: "Billing status or payment status is required"
+    };
+  }
+
+  return { updatePayload };
+}
+
+function isMissingOrderBillingColumnsError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+  const billingColumns = [
+    "payment_status",
+    "billing_status",
+    "bill_number",
+    "billed_at",
+    "paid_at"
+  ];
+
+  return (
+    code === "PGRST204" ||
+    (
+      details.includes("could not find") &&
+      billingColumns.some((columnName) => details.includes(columnName))
+    )
+  );
 }
 
 function buildNotificationSettingsResponse(settingsRow, hotelSlug = "") {
@@ -63,14 +199,36 @@ function buildNotificationSettingsResponse(settingsRow, hotelSlug = "") {
     notifyOnNewInquiry:
       settingsRow?.notify_on_new_inquiry !== undefined
         ? !!settingsRow.notify_on_new_inquiry
-        : true
+      : true
+  };
+}
+
+function isMissingPaymentRouteSettingsTableError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    details.includes("hotel_payment_route_settings")
+  );
+}
+
+function buildPaymentRouteSettingsResponse(settingsRow, hotelSlug = "") {
+  return {
+    hotelSlug: settingsRow?.hotel_slug || String(hotelSlug || "").trim(),
+    provider: settingsRow?.provider || "razorpay",
+    routeEnabled: !!settingsRow?.route_enabled,
+    razorpayLinkedAccountId: settingsRow?.razorpay_linked_account_id || ""
   };
 }
 
 router.use(requireAdminAuth);
 /* ─────────────────────────────────────────────
    GET /api/admin/orders
-   Optional query: ?hotelName=Hotel Sai Raj
+   Optional query: ?hotelName=Hotel Example
    ───────────────────────────────────────────── */
 router.get("/orders", async (req, res) => {
   try {
@@ -105,7 +263,7 @@ router.get("/orders", async (req, res) => {
 
 /* ─────────────────────────────────────────────
    GET /api/admin/inquiries
-   Optional query: ?hotelName=Hotel Sai Raj
+   Optional query: ?hotelName=Hotel Example
    ───────────────────────────────────────────── */
 router.get("/inquiries", async (req, res) => {
   try {
@@ -140,7 +298,7 @@ router.get("/inquiries", async (req, res) => {
 
 /* ─────────────────────────────────────────────
    GET /api/admin/reservations
-   Optional query: ?hotelName=Hotel Sai Raj
+   Optional query: ?hotelName=Hotel Example
    ───────────────────────────────────────────── */
 router.get("/reservations", async (req, res) => {
   try {
@@ -169,6 +327,49 @@ router.get("/reservations", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch reservations"
+    });
+  }
+});
+
+router.get("/contact-submissions", async (req, res) => {
+  try {
+    const { hotelName, hotelSlug } = req.query;
+
+    let query = supabase
+      .from("contact_submissions")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (hotelSlug) {
+      query = query.eq("hotel_slug", String(hotelSlug).trim());
+    } else if (hotelName) {
+      query = query.eq("hotel_name", String(hotelName).trim());
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      if (isMissingContactSubmissionsRelationError(error)) {
+        return res.json({
+          success: true,
+          count: 0,
+          contactSubmissions: []
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      count: Array.isArray(data) ? data.length : 0,
+      contactSubmissions: data || []
+    });
+  } catch (error) {
+    console.error("Admin contact submissions fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch contact submissions"
     });
   }
 });
@@ -366,6 +567,50 @@ router.get("/notification-settings/:slug", async (req, res) => {
   }
 });
 
+router.get("/payment-route-settings/:slug", async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim();
+
+    if (!slug) {
+      return res.status(400).json({
+        success: false,
+        message: "Hotel slug is required"
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("hotel_payment_route_settings")
+      .select("*")
+      .eq("hotel_slug", slug)
+      .maybeSingle();
+
+    if (error) {
+      if (isMissingPaymentRouteSettingsTableError(error)) {
+        return res.json({
+          success: true,
+          schemaReady: false,
+          message: "Payment Route settings table is not initialized yet",
+          settings: buildPaymentRouteSettingsResponse(null, slug)
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      schemaReady: true,
+      settings: buildPaymentRouteSettingsResponse(data, slug)
+    });
+  } catch (error) {
+    console.error("Payment Route settings fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch payment Route settings"
+    });
+  }
+});
+
 
 router.get("/hotels", async (req, res) => {
   try {
@@ -394,12 +639,12 @@ router.get("/hotels", async (req, res) => {
 router.patch("/orders/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const status = getAllowedStatus(req.body?.status, ORDER_STATUSES);
 
     if (!status) {
       return res.status(400).json({
         success: false,
-        message: "Status is required"
+        message: `Status must be one of: ${ORDER_STATUSES.join(", ")}`
       });
     }
 
@@ -426,15 +671,92 @@ router.patch("/orders/:id/status", async (req, res) => {
   }
 });
 
+router.patch("/orders/:id/billing", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { updatePayload, error: validationError } = buildOrderBillingUpdatePayload(req.body);
+
+    if (validationError) {
+      return res.status(400).json({
+        success: false,
+        message: validationError
+      });
+    }
+
+    if (updatePayload.billing_status === "billed") {
+      const { data: currentOrder, error: currentOrderError } = await supabase
+        .from("orders")
+        .select("id,hotel_slug,hotel_name,bill_number")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (currentOrderError) {
+        if (isMissingOrderBillingColumnsError(currentOrderError)) {
+          return res.status(400).json({
+            success: false,
+            message: "Order billing fields are not initialized yet"
+          });
+        }
+
+        throw currentOrderError;
+      }
+
+      if (!currentOrder) {
+        return res.status(404).json({
+          success: false,
+          message: "Order not found"
+        });
+      }
+
+      if (!currentOrder.bill_number) {
+        updatePayload.bill_number = buildOrderBillNumber(
+          currentOrder,
+          updatePayload.billed_at
+        );
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      if (isMissingOrderBillingColumnsError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Order billing fields are not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: "Order billing updated",
+      order: data
+    });
+  } catch (error) {
+    console.error("Order billing update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update order billing"
+    });
+  }
+});
+
 router.patch("/inquiries/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const status = getAllowedStatus(req.body?.status, INQUIRY_STATUSES);
 
     if (!status) {
       return res.status(400).json({
         success: false,
-        message: "Status is required"
+        message: `Status must be one of: ${INQUIRY_STATUSES.join(", ")}`
       });
     }
 
@@ -464,12 +786,12 @@ router.patch("/inquiries/:id/status", async (req, res) => {
 router.patch("/reservations/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const status = getAllowedStatus(req.body?.status, RESERVATION_STATUSES);
 
     if (!status) {
       return res.status(400).json({
         success: false,
-        message: "Status is required"
+        message: `Status must be one of: ${RESERVATION_STATUSES.join(", ")}`
       });
     }
 
@@ -702,6 +1024,53 @@ router.post("/hotel-profiles", validateBody(hotelProfileSchema), async (req, res
   }
 });
 
+router.patch("/contact-submissions/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const status = getAllowedStatus(req.body?.status, CONTACT_SUBMISSION_STATUSES);
+
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: `Status must be one of: ${CONTACT_SUBMISSION_STATUSES.join(", ")}`
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("contact_submissions")
+      .update({
+        status,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      if (isMissingContactSubmissionsRelationError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Contact submissions table is not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: "Contact submission status updated",
+      contactSubmission: data
+    });
+  } catch (error) {
+    console.error("Contact submission status update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update contact submission status"
+    });
+  }
+});
+
 router.post(
   "/notification-settings",
   validateBody(hotelNotificationSettingsSchema),
@@ -752,6 +1121,62 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Failed to save notification settings"
+      });
+    }
+  }
+);
+
+router.post(
+  "/payment-route-settings",
+  validateBody(hotelPaymentRouteSettingsSchema),
+  async (req, res) => {
+    try {
+      const {
+        hotelSlug,
+        provider = "razorpay",
+        routeEnabled,
+        razorpayLinkedAccountId
+      } = req.validatedBody;
+      const linkedAccountId = String(razorpayLinkedAccountId || "").trim();
+
+      const { data, error } = await supabase
+        .from("hotel_payment_route_settings")
+        .upsert(
+          [
+            {
+              hotel_slug: hotelSlug,
+              provider,
+              route_enabled: routeEnabled !== undefined ? !!routeEnabled : false,
+              razorpay_linked_account_id: linkedAccountId || null,
+              updated_at: new Date().toISOString()
+            }
+          ],
+          { onConflict: "hotel_slug" }
+        )
+        .select()
+        .single();
+
+      if (error) {
+        if (isMissingPaymentRouteSettingsTableError(error)) {
+          return res.status(400).json({
+            success: false,
+            message: "Payment Route settings table is not initialized yet"
+          });
+        }
+
+        throw error;
+      }
+
+      res.json({
+        success: true,
+        message: "Payment Route settings saved successfully",
+        settings: buildPaymentRouteSettingsResponse(data, hotelSlug)
+      });
+    } catch (error) {
+      console.error("Payment Route settings save error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to save payment Route settings"
       });
     }
   }

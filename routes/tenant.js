@@ -3,6 +3,14 @@ const { supabase } = require("../utils/supabase");
 
 const router = express.Router();
 
+const PUBLIC_TENANT_FIELDS = [
+  "slug",
+  "name",
+  "primary_domain",
+  "subdomain",
+  "is_active"
+].join(",");
+
 /*
   GET /api/tenant/resolve?host=example.com
   Returns hotel record matching:
@@ -25,7 +33,7 @@ router.get("/resolve", async (req, res) => {
     // First try exact primary domain match
     let { data, error } = await supabase
       .from("hotels")
-      .select("*")
+      .select(PUBLIC_TENANT_FIELDS)
       .eq("primary_domain", normalizedHost)
       .eq("is_active", true)
       .maybeSingle();
@@ -38,7 +46,7 @@ router.get("/resolve", async (req, res) => {
 
       const subdomainResult = await supabase
         .from("hotels")
-        .select("*")
+        .select(PUBLIC_TENANT_FIELDS)
         .eq("subdomain", subdomainPart)
         .eq("is_active", true)
         .maybeSingle();

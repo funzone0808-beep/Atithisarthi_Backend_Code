@@ -1,35 +1,37 @@
-const jwt = require("jsonwebtoken");
-const { env } = require("../config/env");
-// ./utils/logger.js
-const logger = {
-  info: (message, meta) => {
-    console.log("[INFO]", message, meta || "");
-  },
-  error: (message, meta) => {
-    console.error("[ERROR]", message, meta || "");
-  },
-};
+function normalizeMeta(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return meta || "";
+  }
 
-function signAdminToken(adminUser) {
-  return jwt.sign(
-    {
-      sub: adminUser.id,
-      email: adminUser.email,
-      fullName: adminUser.full_name || ""
-    },
-    env.jwtSecret,
-    {
-      expiresIn: env.jwtExpiresIn
-    }
-  );
+  return meta;
 }
 
-function verifyAdminToken(token) {
-  return jwt.verify(token, env.jwtSecret);
+function writeLog(level, message, meta) {
+  const timestamp = new Date().toISOString();
+  const normalizedMessage = String(message || "").trim() || "log";
+  const normalizedMeta = normalizeMeta(meta);
+
+  if (level === "ERROR") {
+    console.error(`[${level}]`, timestamp, normalizedMessage, normalizedMeta);
+    return;
+  }
+
+  if (level === "WARN") {
+    console.warn(`[${level}]`, timestamp, normalizedMessage, normalizedMeta);
+    return;
+  }
+
+  console.log(`[${level}]`, timestamp, normalizedMessage, normalizedMeta);
 }
 
 module.exports = {
-  signAdminToken,
-  verifyAdminToken,
+  info(message, meta) {
+    writeLog("INFO", message, meta);
+  },
+  warn(message, meta) {
+    writeLog("WARN", message, meta);
+  },
+  error(message, meta) {
+    writeLog("ERROR", message, meta);
+  }
 };
-module.exports = logger;
