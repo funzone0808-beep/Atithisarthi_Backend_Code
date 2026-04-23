@@ -10,7 +10,8 @@ const orderItemSchema = z.object({
 const orderContextSchema = z.object({
   orderType: z.string().trim().max(40).optional(),
   tableNumber: z.string().trim().max(80).optional(),
-  orderSource: z.string().trim().max(40).optional()
+  orderSource: z.string().trim().max(40).optional(),
+  qrContextToken: z.string().trim().max(2000).optional()
 }).optional();
 
 const orderSchema = z.object({

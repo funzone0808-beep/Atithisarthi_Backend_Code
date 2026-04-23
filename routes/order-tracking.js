@@ -1,4 +1,5 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { supabase } = require("../utils/supabase");
 const {
   buildOrderTrackingReference,
@@ -8,6 +9,40 @@ const {
 const { createNotificationEventSafely } = require("../utils/notifications");
 
 const router = express.Router();
+const TRACKING_ROUTE_WINDOW_MS = 10 * 60 * 1000;
+
+function getTrackingRateLimitKey(req = {}) {
+  const hotelSlug = String(req.params?.hotelSlug || "").trim().toLowerCase();
+  const orderId = String(req.params?.orderId || "").trim().toLowerCase();
+  const normalizedIp = req.ip
+    ? rateLimit.ipKeyGenerator(req.ip)
+    : "unknown";
+  return `${normalizedIp}:${hotelSlug}:${orderId}`;
+}
+
+const trackingViewLimiter = rateLimit({
+  windowMs: TRACKING_ROUTE_WINDOW_MS,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getTrackingRateLimitKey,
+  message: {
+    success: false,
+    message: "Too many order tracking refreshes. Please wait a moment and try again."
+  }
+});
+
+const trackingSupportLimiter = rateLimit({
+  windowMs: TRACKING_ROUTE_WINDOW_MS,
+  limit: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getTrackingRateLimitKey,
+  message: {
+    success: false,
+    message: "Too many support requests for this order. Please wait a moment and try again."
+  }
+});
 
 const TRACKING_SELECT_FULL = [
   "id",
@@ -643,7 +678,7 @@ async function fetchPublicAddonOrders(baseOrder = {}) {
   return data || [];
 }
 
-router.post("/:hotelSlug/:orderId/support-requests", async (req, res) => {
+router.post("/:hotelSlug/:orderId/support-requests", trackingSupportLimiter, async (req, res) => {
   try {
     const hotelSlug = normalizePublicText(req.params.hotelSlug, 120);
     const orderId = normalizePublicText(req.params.orderId, 120);
@@ -1003,7 +1038,7 @@ router.post("/:hotelSlug/:orderId/add-items", async (req, res) => {
   }
 });
 
-router.get("/:hotelSlug/:orderId", async (req, res) => {
+router.get("/:hotelSlug/:orderId", trackingViewLimiter, async (req, res) => {
   try {
     const hotelSlug = normalizePublicText(req.params.hotelSlug, 120);
     const orderId = normalizePublicText(req.params.orderId, 120);

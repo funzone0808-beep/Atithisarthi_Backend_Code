@@ -11,12 +11,14 @@ const {
   hotelSchema,
   hotelPaymentRouteSettingsSchema,
   hotelNotificationSettingsSchema,
+  qrLinkSignatureSchema,
   menuItemSchema,
   partialGalleryItemSchema,
   hotelProfileSchema,
   testimonialSchema,
   partialTestimonialSchema
 } = require("../validators/admin");
+const { buildQrContextToken } = require("../utils/qr-context");
 
 const NOTIFICATION_EVENT_SOURCE_TYPES = ["order", "reservation", "inquiry"];
 const NOTIFICATION_EVENT_STATUSES = ["pending", "sent", "failed", "skipped"];
@@ -226,6 +228,39 @@ function buildPaymentRouteSettingsResponse(settingsRow, hotelSlug = "") {
 }
 
 router.use(requireAdminAuth);
+
+router.post("/qr-links/sign", validateBody(qrLinkSignatureSchema), async (req, res) => {
+  try {
+    const {
+      hotelSlug,
+      tableNumber,
+      orderSource = "qr"
+    } = req.validatedBody;
+
+    const qrContextToken = buildQrContextToken({
+      hotelSlug,
+      tableNumber,
+      orderSource,
+      orderType: "dine-in"
+    });
+
+    res.json({
+      success: true,
+      qrContextToken,
+      context: {
+        hotelSlug,
+        tableNumber,
+        orderSource: orderSource || "qr",
+        orderType: "dine-in"
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to sign QR link"
+    });
+  }
+});
 /* ─────────────────────────────────────────────
    GET /api/admin/orders
    Optional query: ?hotelName=Hotel Example

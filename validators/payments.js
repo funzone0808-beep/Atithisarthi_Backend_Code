@@ -8,7 +8,8 @@ const paymentCartItemSchema = z.object({
 const paymentOrderContextSchema = z.object({
   orderType: z.string().trim().max(40).optional(),
   tableNumber: z.string().trim().max(80).optional(),
-  orderSource: z.string().trim().max(40).optional()
+  orderSource: z.string().trim().max(40).optional(),
+  qrContextToken: z.string().trim().max(2000).optional()
 }).optional();
 
 const paymentOrderDraftSchema = z.object({

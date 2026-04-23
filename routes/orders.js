@@ -6,6 +6,7 @@ const {
   buildOrderTrackingReference,
   getOrderTrackingColumns
 } = require("../utils/order-tracking");
+const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
 
 // ✅ Added imports
 const { validateBody } = require("../validators/common");
@@ -141,6 +142,24 @@ function hasDineInTableContext(orderContext) {
   return orderContext?.orderType === "dine-in" && !!orderContext.tableNumber;
 }
 
+function getDeliveryCharge(hotel = {}, orderContext = null) {
+  if (hasDineInTableContext(orderContext)) {
+    return 0;
+  }
+
+  const theme =
+    hotel?.theme && typeof hotel.theme === "object" && !Array.isArray(hotel.theme)
+      ? hotel.theme
+      : {};
+  const payment =
+    theme.payment && typeof theme.payment === "object" && !Array.isArray(theme.payment)
+      ? theme.payment
+      : {};
+  const candidate = Number(payment.deliveryCharge);
+
+  return Number.isFinite(candidate) && candidate > 0 ? candidate : 0;
+}
+
 function getBillingMetadataColumns({ orderContext, paymentMethod, paymentConfirmed }) {
   if (!hasDineInTableContext(orderContext)) {
     return {};
@@ -231,7 +250,7 @@ async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
   return new Map((data || []).map((item) => [String(item.item_id), item]));
 }
 
-async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod }) {
+async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod, orderContext }) {
   const pricingContext = await getHotelPricingContext(hotelSlug);
 
   if (pricingContext.error) {
@@ -266,7 +285,8 @@ async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod }
   const subtotal = verifiedItems.reduce((sum, item) => sum + item.lineTotal, 0);
   const gstPercent = Number(hotel.gst_percent || 5);
   const gst = Math.round((subtotal * gstPercent) / 100);
-  const normalTotal = subtotal + gst;
+  const deliveryCharge = getDeliveryCharge(hotel, orderContext);
+  const normalTotal = subtotal + gst + deliveryCharge;
   const upiDiscountPercent = getUpiDiscountPercent(hotel);
   const gpayDiscount = Math.round((normalTotal * upiDiscountPercent) / 100);
   const gpayFinalTotal = Math.max(0, normalTotal - gpayDiscount);
@@ -274,6 +294,7 @@ async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod }
   const verifiedTotals = {
     subtotal,
     gst,
+    deliveryCharge,
     gstPercent,
     normalTotal,
     upiDiscountPercent,
@@ -328,6 +349,9 @@ function buildVerifiedOrderSummary({
   lines.push("");
   lines.push(`Subtotal = ${formatMoney(totals.subtotal)}`);
   lines.push(`GST = ${formatMoney(totals.gst)}`);
+  if (Number(totals.deliveryCharge || 0) > 0) {
+    lines.push(`Delivery Charge = ${formatMoney(totals.deliveryCharge)}`);
+  }
 
   if (isUpi) {
     lines.push(`Original Total = ${formatMoney(totals.normalTotal)}`);
@@ -468,20 +492,34 @@ router.post("/", validateBody(orderSchema), async (req, res) => {
     } = req.validatedBody;
 
     requestHotelSlug = hotelSlug;
-    requestOrderContext = orderContext;
     requestItemCount = Array.isArray(items) ? items.length : 0;
+
+    const resolvedOrderContext = resolveVerifiedQrOrderContext({
+      hotelSlug,
+      orderContext
+    });
+
+    if (!resolvedOrderContext.ok) {
+      return res.status(400).json({
+        success: false,
+        message: resolvedOrderContext.message
+      });
+    }
+
+    requestOrderContext = resolvedOrderContext.orderContext;
 
     const requestLogMeta = getOrderLogMeta({
       requestId: req.requestId,
       hotelSlug,
-      orderContext,
+      orderContext: requestOrderContext,
       itemCount: requestItemCount
     });
 
     const verifiedPricing = await calculateVerifiedOrderPricing({
       hotelSlug,
       items,
-      paymentMethod
+      paymentMethod,
+      orderContext: requestOrderContext
     });
 
     if (verifiedPricing.error) {
@@ -497,7 +535,7 @@ router.post("/", validateBody(orderSchema), async (req, res) => {
       });
     }
 
-    const safeOrderContext = getNormalizedOrderContext(orderContext);
+    const safeOrderContext = requestOrderContext;
     const approvedHotelName = verifiedPricing.hotel.hotel_name || hotelName || "Unknown Hotel";
     const approvedWhatsappMessage = buildVerifiedOrderSummary({
       hotelName: approvedHotelName,

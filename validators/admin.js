@@ -247,6 +247,12 @@ const hotelPaymentRouteSettingsSchema = z
     }
   });
 
+const qrLinkSignatureSchema = z.object({
+  hotelSlug: z.string().trim().min(2).max(120),
+  tableNumber: z.string().trim().min(1).max(80),
+  orderSource: z.string().trim().max(40).optional()
+});
+
 const hotelProfileSchema = z.object({
   hotelSlug: z.string().trim().min(2).max(120),
   hotelName: z.string().trim().min(2).max(150),
@@ -281,6 +287,7 @@ module.exports = {
   partialGalleryItemSchema,
   hotelPaymentRouteSettingsSchema,
   hotelNotificationSettingsSchema,
+  qrLinkSignatureSchema,
   menuItemSchema,
   partialMenuItemSchema,
   hotelProfileSchema,

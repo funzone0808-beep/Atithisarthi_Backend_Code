@@ -19,12 +19,14 @@ const env = {
 
   jwtSecret: getRequiredEnv("JWT_SECRET"),
   jwtExpiresIn: getEnv("JWT_EXPIRES_IN", "7d"),
-
+  qrContextSigningSecret: getEnv("QR_CONTEXT_SIGNING_SECRET", ""),
+  qrContextStrictRequired:
+    getEnv("QR_CONTEXT_STRICT_REQUIRED", "false") === "true",
   frontendUrl: getEnv("FRONTEND_URL", " "),
   adminUrl: getEnv("ADMIN_URL", " "),
   notificationDeliveryEnabled:
     getEnv("NOTIFICATION_DELIVERY_ENABLED", "false") === "true",
-  notificationDeliveryChannel: getEnv("NOTIFICATION_DELIVERY_CHANNEL", "internal"),
+  notificationDeliveryChannel: getEnv("NOTIFICATION_DELIVERY_CHANNEL", "email"),
   notificationEmailFrom: getEnv("NOTIFICATION_EMAIL_FROM", ""),
   notificationEmailTo: getEnv("NOTIFICATION_EMAIL_TO", ""),
   notificationSmtpHost: getEnv("NOTIFICATION_SMTP_HOST", ""),

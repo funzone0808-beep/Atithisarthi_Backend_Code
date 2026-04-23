@@ -1,6 +1,7 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
 const logger = require("../utils/logger");
+const { createNotificationEventSafely } = require("../utils/notifications");
 const { validateBody } = require("../validators/common");
 const {
   paymentFailureSchema,
@@ -22,6 +23,7 @@ const {
   getOrderTrackingColumns,
   isMissingOrderTrackingColumnsError
 } = require("../utils/order-tracking");
+const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
 
 const router = express.Router();
 const PAYMENT_GATEWAY_ORDER_COLUMNS = [
@@ -58,6 +60,28 @@ function getGatewayPaymentAmount(totals, paymentMethod = "") {
     normalizedPaymentMethod.includes("google pay");
 
   return shouldApplyUpiDiscount ? totals.gpayFinalTotal : totals.normalTotal;
+}
+
+function hasGatewayDineInTableContext(orderContext = null) {
+  return orderContext?.orderType === "dine-in" && !!orderContext.tableNumber;
+}
+
+function getGatewayDeliveryCharge(hotel = {}, orderContext = null) {
+  if (hasGatewayDineInTableContext(orderContext)) {
+    return 0;
+  }
+
+  const theme =
+    hotel?.theme && typeof hotel.theme === "object" && !Array.isArray(hotel.theme)
+      ? hotel.theme
+      : {};
+  const payment =
+    theme.payment && typeof theme.payment === "object" && !Array.isArray(theme.payment)
+      ? theme.payment
+      : {};
+  const candidate = Number(payment.deliveryCharge);
+
+  return Number.isFinite(candidate) && candidate > 0 ? candidate : 0;
 }
 
 function buildReceipt(hotelSlug = "") {
@@ -415,7 +439,7 @@ async function getHotelMenuItemsById(hotelSlug, itemIds = []) {
   return new Map((data || []).map((item) => [String(item.item_id), item]));
 }
 
-async function calculateGatewayTotals({ hotelSlug, items, paymentMethod }) {
+async function calculateGatewayTotals({ hotelSlug, items, paymentMethod, orderContext }) {
   const hotel = await getHotelPaymentContext(hotelSlug);
 
   if (!hotel) {
@@ -450,7 +474,8 @@ async function calculateGatewayTotals({ hotelSlug, items, paymentMethod }) {
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0);
   const gstPercent = Number(hotel.gst_percent || 5);
   const gst = Math.round((subtotal * gstPercent) / 100);
-  const normalTotal = subtotal + gst;
+  const deliveryCharge = getGatewayDeliveryCharge(hotel, orderContext);
+  const normalTotal = subtotal + gst + deliveryCharge;
   const upiDiscountPercent = getUpiDiscountPercent(hotel);
   const gpayDiscount = Math.round((normalTotal * upiDiscountPercent) / 100);
   const gpayFinalTotal = Math.max(0, normalTotal - gpayDiscount);
@@ -465,6 +490,7 @@ async function calculateGatewayTotals({ hotelSlug, items, paymentMethod }) {
     totals: {
       subtotal,
       gst,
+      deliveryCharge,
       gstPercent,
       normalTotal,
       upiDiscountPercent,
@@ -493,6 +519,7 @@ function buildPendingGatewayOrderTotals(totals = {}) {
   return {
     subtotal: totals.subtotal || 0,
     gst: totals.gst || 0,
+    deliveryCharge: totals.deliveryCharge || 0,
     gstPercent: totals.gstPercent || 0,
     total: totals.gatewayAmount || totals.normalTotal || 0,
     normalTotal: totals.normalTotal || 0,
@@ -802,6 +829,10 @@ async function markLinkedOrderPaidFromVerifiedGateway({
     };
   }
 
+  const shouldCreateOperationalNotification =
+    existingOrder.status === "payment_pending" &&
+    existingOrder.payment_status !== "paid";
+
   const verifiedAt = new Date().toISOString();
   const config = getPaymentGatewayConfig();
   const updatePayload = {
@@ -827,7 +858,7 @@ async function markLinkedOrderPaidFromVerifiedGateway({
     .eq("id", orderId)
     .eq("hotel_slug", hotelSlug)
     .eq("gateway_order_id", gatewayOrderId)
-    .select("id,hotel_slug,status,payment_status,gateway_status,gateway_order_id,gateway_payment_id,payment_verified_at,paid_at")
+    .select("id,hotel_slug,hotel_name,customer_name,customer_phone,customer_address,payment_method,payment_status,billing_status,note,items,totals,whatsapp_message,status,table_number,order_type,order_source,gateway_status,gateway_order_id,gateway_payment_id,payment_verified_at,paid_at")
     .maybeSingle();
 
   if (error) {
@@ -839,6 +870,37 @@ async function markLinkedOrderPaidFromVerifiedGateway({
     }
 
     throw error;
+  }
+
+  if (data && shouldCreateOperationalNotification) {
+    void createNotificationEventSafely({
+      hotelSlug: data.hotel_slug || hotelSlug || null,
+      sourceType: "order",
+      sourceId: data.id,
+      payload: {
+        orderId: data.id,
+        hotelName: data.hotel_name || "",
+        customerName: data.customer_name || "",
+        customerPhone: data.customer_phone || "",
+        customerAddress: data.customer_address || "",
+        paymentMethod: data.payment_method || "Online Payment",
+        paymentStatus: data.payment_status || "paid",
+        billingStatus: data.billing_status || null,
+        note: data.note || "",
+        items: Array.isArray(data.items) ? data.items : [],
+        totals:
+          data.totals && typeof data.totals === "object" && !Array.isArray(data.totals)
+            ? data.totals
+            : {},
+        whatsappMessage: data.whatsapp_message || "",
+        orderContext: {
+          orderType: data.order_type || "",
+          tableNumber: data.table_number || "",
+          orderSource: data.order_source || ""
+        },
+        status: data.status || "new"
+      }
+    });
   }
 
   return {
@@ -994,17 +1056,32 @@ router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
       orderContext,
       orderDraft
     } = req.validatedBody;
+
+    const resolvedOrderContext = resolveVerifiedQrOrderContext({
+      hotelSlug,
+      orderContext
+    });
+
+    if (!resolvedOrderContext.ok) {
+      return res.status(400).json({
+        success: false,
+        message: resolvedOrderContext.message
+      });
+    }
+
+    const safeOrderContext = resolvedOrderContext.orderContext;
     paymentLogMeta = getPaymentLogMeta({
       requestId: req.requestId || "",
       hotelSlug,
       paymentMethod,
-      orderContext,
+      orderContext: safeOrderContext,
       itemCount: Array.isArray(items) ? items.length : 0
     });
     const paymentContext = await calculateGatewayTotals({
       hotelSlug,
       items,
-      paymentMethod
+      paymentMethod,
+      orderContext: safeOrderContext
     });
 
     if (paymentContext.error) {
@@ -1027,7 +1104,7 @@ router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
     const paymentRouteTransfer = buildGatewayRouteTransfers({
       config,
       hotelSlug,
-      orderContext,
+      orderContext: safeOrderContext,
       paymentContext,
       paymentRouteSettings,
       amountMinor,
@@ -1039,7 +1116,7 @@ router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
       receipt,
       notes: buildPaymentNotes({
         hotelSlug,
-        orderContext,
+        orderContext: safeOrderContext,
         itemCount: paymentContext.items.length,
         paymentRouteSettings
       }),
@@ -1048,7 +1125,7 @@ router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
     const pendingOrder = await createPendingGatewayLinkedOrder({
       hotelSlug,
       paymentMethod,
-      orderContext,
+      orderContext: safeOrderContext,
       orderDraft,
       paymentContext,
       gatewayOrder,

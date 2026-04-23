@@ -263,6 +263,339 @@ function buildNotificationEmailText(notificationEvent = {}) {
   ].join("\n");
 }
 
+function getNotificationPayload(notificationEvent = {}) {
+  return notificationEvent.payload &&
+    typeof notificationEvent.payload === "object" &&
+    !Array.isArray(notificationEvent.payload)
+    ? notificationEvent.payload
+    : {};
+}
+
+function escapeEmailHtml(value = "") {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatNotificationMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? `Rs. ${amount.toFixed(2)}` : "Rs. 0.00";
+}
+
+function formatNotificationDateTime(value = "") {
+  const candidate = String(value || "").trim();
+
+  if (!candidate) return "";
+
+  const date = new Date(candidate);
+
+  if (Number.isNaN(date.getTime())) {
+    return candidate;
+  }
+
+  return date.toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+}
+
+function buildNotificationBadge(label = "", tone = "default") {
+  const tones = {
+    default: {
+      background: "#f5efe1",
+      text: "#6a4b14"
+    },
+    success: {
+      background: "#e8f7ef",
+      text: "#136a3f"
+    },
+    info: {
+      background: "#e9f2ff",
+      text: "#1a4fa3"
+    }
+  };
+  const palette = tones[tone] || tones.default;
+
+  return `<span style="display:inline-block;padding:6px 10px;border-radius:999px;background:${palette.background};color:${palette.text};font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;">${escapeEmailHtml(label)}</span>`;
+}
+
+function buildNotificationInfoRows(rows = []) {
+  const safeRows = rows.filter((row) => row && row.value !== undefined && row.value !== null && String(row.value).trim() !== "");
+
+  if (!safeRows.length) {
+    return "";
+  }
+
+  return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+      ${safeRows
+        .map(
+          (row) => `
+            <tr>
+              <td style="padding:10px 0;border-bottom:1px solid #ece4d7;width:36%;font-size:13px;color:#7a6b5a;font-weight:600;">${escapeEmailHtml(row.label)}</td>
+              <td style="padding:10px 0;border-bottom:1px solid #ece4d7;font-size:14px;color:#24190f;">${escapeEmailHtml(row.value)}</td>
+            </tr>
+          `
+        )
+        .join("")}
+    </table>
+  `;
+}
+
+function buildNotificationItemsTable(items = []) {
+  const safeItems = Array.isArray(items) ? items : [];
+
+  if (!safeItems.length) {
+    return "";
+  }
+
+  return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #ece4d7;border-radius:16px;overflow:hidden;">
+      <thead>
+        <tr style="background:#f8f3ea;">
+          <th align="left" style="padding:12px 14px;font-size:12px;color:#7a6b5a;text-transform:uppercase;letter-spacing:0.05em;">Item</th>
+          <th align="center" style="padding:12px 14px;font-size:12px;color:#7a6b5a;text-transform:uppercase;letter-spacing:0.05em;">Qty</th>
+          <th align="right" style="padding:12px 14px;font-size:12px;color:#7a6b5a;text-transform:uppercase;letter-spacing:0.05em;">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${safeItems
+          .map((item) => {
+            const qty = Number(item?.qty || 0);
+            const price = Number(item?.price || 0);
+            const lineTotal = Number.isFinite(Number(item?.lineTotal))
+              ? Number(item.lineTotal)
+              : qty * price;
+
+            return `
+              <tr>
+                <td style="padding:12px 14px;border-top:1px solid #ece4d7;font-size:14px;color:#24190f;">${escapeEmailHtml(item?.name || item?.id || "Item")}</td>
+                <td align="center" style="padding:12px 14px;border-top:1px solid #ece4d7;font-size:14px;color:#5a4b3b;">${escapeEmailHtml(qty)}</td>
+                <td align="right" style="padding:12px 14px;border-top:1px solid #ece4d7;font-size:14px;color:#24190f;font-weight:600;">${escapeEmailHtml(formatNotificationMoney(lineTotal))}</td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function buildNotificationTotalsTable(totals = {}, sourceType = "") {
+  const safeTotals =
+    totals && typeof totals === "object" && !Array.isArray(totals) ? totals : {};
+  const rows = [];
+  const subtotal = Number(safeTotals.subtotal);
+  const gst = Number(safeTotals.gst);
+  const deliveryCharge = Number(safeTotals.deliveryCharge);
+  const normalTotal = Number(safeTotals.normalTotal);
+  const gpayDiscount = Number(safeTotals.gpayDiscount);
+  const gpayFinalTotal = Number(safeTotals.gpayFinalTotal);
+  const total = Number(safeTotals.total);
+
+  if (Number.isFinite(subtotal)) {
+    rows.push({ label: "Subtotal", value: formatNotificationMoney(subtotal) });
+  }
+
+  if (Number.isFinite(gst)) {
+    rows.push({ label: "GST", value: formatNotificationMoney(gst) });
+  }
+
+  if (Number.isFinite(deliveryCharge) && deliveryCharge > 0) {
+    rows.push({ label: "Delivery Charge", value: formatNotificationMoney(deliveryCharge) });
+  }
+
+  if (Number.isFinite(normalTotal)) {
+    rows.push({
+      label: sourceType === "order" && Number.isFinite(gpayDiscount) && gpayDiscount > 0 ? "Original Total" : "Total",
+      value: formatNotificationMoney(normalTotal)
+    });
+  }
+
+  if (Number.isFinite(gpayDiscount) && gpayDiscount > 0) {
+    rows.push({ label: "UPI Discount", value: `-${formatNotificationMoney(gpayDiscount)}` });
+  }
+
+  if (Number.isFinite(gpayFinalTotal) && gpayFinalTotal >= 0 && gpayFinalTotal !== normalTotal) {
+    rows.push({ label: "Final Paid Amount", value: formatNotificationMoney(gpayFinalTotal) });
+  } else if (!Number.isFinite(normalTotal) && Number.isFinite(total)) {
+    rows.push({ label: "Total", value: formatNotificationMoney(total) });
+  }
+
+  if (!rows.length) {
+    return "";
+  }
+
+  return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+      ${rows
+        .map(
+          (row, index) => `
+            <tr>
+              <td style="padding:${index === 0 ? "0" : "10px 0 0"} 0;font-size:13px;color:#7a6b5a;">${escapeEmailHtml(row.label)}</td>
+              <td align="right" style="padding:${index === 0 ? "0" : "10px 0 0"} 0;font-size:14px;color:#24190f;font-weight:700;">${escapeEmailHtml(row.value)}</td>
+            </tr>
+          `
+        )
+        .join("")}
+    </table>
+  `;
+}
+
+function buildNotificationEmailHtml(notificationEvent = {}) {
+  const payload = getNotificationPayload(notificationEvent);
+  const sourceType = String(notificationEvent.source_type || "").trim().toLowerCase();
+  const hotelName = String(payload.hotelName || notificationEvent.hotel_slug || "Hotel").trim();
+  const eventTitleMap = {
+    order: "New order received",
+    reservation: "New reservation received",
+    inquiry: "New inquiry received"
+  };
+  const eventTitle = eventTitleMap[sourceType] || "New notification received";
+  let primaryBadge = buildNotificationBadge(String(sourceType || "event"), "default");
+  let secondaryBadge = "";
+  let overviewRows = [];
+  let detailsSection = "";
+  let itemsSection = "";
+  let totalsSection = "";
+  const note = String(
+    payload.note ||
+      payload.specialRequirements ||
+      ""
+  ).trim();
+
+  if (sourceType === "order") {
+    const orderContext =
+      payload.orderContext && typeof payload.orderContext === "object" && !Array.isArray(payload.orderContext)
+        ? payload.orderContext
+        : {};
+    overviewRows = [
+      { label: "Order ID", value: payload.orderId || notificationEvent.source_id || "" },
+      { label: "Customer", value: payload.customerName || "" },
+      { label: "Phone", value: payload.customerPhone || "" },
+      { label: "Address", value: payload.customerAddress || "" },
+      { label: "Payment Method", value: payload.paymentMethod || "" },
+      { label: "Payment Status", value: payload.paymentStatus || "" },
+      { label: "Billing Status", value: payload.billingStatus || "" },
+      { label: "Order Type", value: orderContext.orderType || "" },
+      { label: "Table", value: orderContext.tableNumber || "" },
+      { label: "Source", value: orderContext.orderSource || "" }
+    ];
+    primaryBadge = buildNotificationBadge(payload.paymentMethod || "order", "info");
+    secondaryBadge = payload.status
+      ? buildNotificationBadge(payload.status, payload.status === "new" ? "default" : "success")
+      : "";
+    itemsSection = Array.isArray(payload.items) && payload.items.length
+      ? `
+        <div style="margin-top:28px;">
+          <h3 style="margin:0 0 12px;font-size:16px;line-height:1.4;color:#24190f;">Items</h3>
+          ${buildNotificationItemsTable(payload.items)}
+        </div>
+      `
+      : "";
+    totalsSection = buildNotificationTotalsTable(payload.totals, sourceType)
+      ? `
+        <div style="margin-top:28px;padding:18px 20px;border-radius:18px;background:#f8f3ea;border:1px solid #ece4d7;">
+          <h3 style="margin:0 0 12px;font-size:16px;line-height:1.4;color:#24190f;">Payment summary</h3>
+          ${buildNotificationTotalsTable(payload.totals, sourceType)}
+        </div>
+      `
+      : "";
+  } else if (sourceType === "reservation") {
+    overviewRows = [
+      { label: "Reservation ID", value: payload.reservationId || notificationEvent.source_id || "" },
+      { label: "Guest", value: payload.name || "" },
+      { label: "Phone", value: payload.phone || "" },
+      { label: "Date", value: payload.date || "" },
+      { label: "Time", value: payload.time || "" },
+      { label: "Guests", value: payload.guests || "" },
+      { label: "Status", value: payload.status || "" }
+    ];
+    primaryBadge = buildNotificationBadge("reservation", "info");
+  } else if (sourceType === "inquiry") {
+    overviewRows = [
+      { label: "Inquiry ID", value: payload.inquiryId || notificationEvent.source_id || "" },
+      { label: "Guest", value: payload.name || "" },
+      { label: "Phone", value: payload.phone || "" },
+      { label: "Event Type", value: payload.eventType || "" },
+      { label: "Date", value: payload.date || "" },
+      { label: "Guests", value: payload.guests || "" },
+      { label: "Status", value: payload.status || "" }
+    ];
+    primaryBadge = buildNotificationBadge("inquiry", "info");
+  } else {
+    detailsSection = buildNotificationInfoRows([
+      { label: "Hotel", value: notificationEvent.hotel_slug || "" },
+      { label: "Source", value: notificationEvent.source_type || "" },
+      { label: "Event", value: notificationEvent.event_type || "" },
+      { label: "Reference", value: notificationEvent.source_id || "" }
+    ]);
+  }
+
+  if (!detailsSection) {
+    detailsSection = buildNotificationInfoRows(overviewRows);
+  }
+
+  const noteSection = note
+    ? `
+      <div style="margin-top:28px;padding:18px 20px;border-radius:18px;background:#fffaf0;border:1px solid #f0dfb2;">
+        <h3 style="margin:0 0 10px;font-size:16px;line-height:1.4;color:#24190f;">Special note</h3>
+        <p style="margin:0;font-size:14px;line-height:1.7;color:#4f4133;white-space:pre-line;">${escapeEmailHtml(note)}</p>
+      </div>
+    `
+    : "";
+
+  const createdAtLabel = formatNotificationDateTime(notificationEvent.created_at || "");
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeEmailHtml(eventTitle)}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4efe7;font-family:Arial,'Helvetica Neue',sans-serif;color:#24190f;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:#f4efe7;padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;max-width:680px;background:#ffffff;border-radius:24px;overflow:hidden;box-shadow:0 24px 70px rgba(68,44,18,0.12);">
+            <tr>
+              <td style="padding:36px 34px;background:linear-gradient(135deg,#1f150e 0%,#5c3a1c 52%,#b88a45 100%);">
+                <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#f2dec0;font-weight:700;">Hotel Operations</div>
+                <h1 style="margin:14px 0 10px;font-size:30px;line-height:1.2;color:#ffffff;font-family:Georgia,'Times New Roman',serif;">${escapeEmailHtml(eventTitle)}</h1>
+                <p style="margin:0;font-size:15px;line-height:1.7;color:#f7ead7;">${escapeEmailHtml(hotelName)}</p>
+                <div style="margin-top:20px;">${primaryBadge}${secondaryBadge ? `&nbsp;${secondaryBadge}` : ""}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:30px 34px;">
+                <div style="padding:20px 22px;border-radius:20px;background:#fcfaf7;border:1px solid #ece4d7;">
+                  <h2 style="margin:0 0 14px;font-size:17px;line-height:1.4;color:#24190f;">Operational details</h2>
+                  ${detailsSection}
+                </div>
+                ${itemsSection}
+                ${totalsSection}
+                ${noteSection}
+                <div style="margin-top:30px;padding-top:18px;border-top:1px solid #ece4d7;font-size:12px;line-height:1.7;color:#7a6b5a;">
+                  <div><strong style="color:#4f4133;">Hotel slug:</strong> ${escapeEmailHtml(notificationEvent.hotel_slug || "")}</div>
+                  <div><strong style="color:#4f4133;">Event type:</strong> ${escapeEmailHtml(notificationEvent.event_type || "")}</div>
+                  <div><strong style="color:#4f4133;">Reference:</strong> ${escapeEmailHtml(notificationEvent.source_id || "")}</div>
+                  ${createdAtLabel ? `<div><strong style="color:#4f4133;">Recorded at:</strong> ${escapeEmailHtml(createdAtLabel)}</div>` : ""}
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
 async function sendNotificationEventEmail(notificationEvent = {}, hotelSettings = {}) {
   const transporter = getNotificationEmailTransporter();
 
@@ -270,7 +603,8 @@ async function sendNotificationEventEmail(notificationEvent = {}, hotelSettings 
     from: String(env.notificationEmailFrom || "").trim(),
     to: String(hotelSettings.ownerEmail || "").trim(),
     subject: buildNotificationEmailSubject(notificationEvent),
-    text: buildNotificationEmailText(notificationEvent)
+    text: buildNotificationEmailText(notificationEvent),
+    html: buildNotificationEmailHtml(notificationEvent)
   });
 }
 

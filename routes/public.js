@@ -2,6 +2,9 @@ const express = require("express");
 const { supabase } = require("../utils/supabase");
 
 const router = express.Router();
+const PUBLIC_ROUTE_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=120";
+const PUBLIC_ROUTE_CACHE_TTL_MS = 30 * 1000;
+const publicRouteCache = new Map();
 
 const PUBLIC_HOTEL_PROFILE_FIELDS = [
   "hotel_slug",
@@ -77,9 +80,38 @@ function isMissingTestimonialsRelationError(error) {
   );
 }
 
+function getCachedPublicRoutePayload(cacheKey) {
+  const cachedEntry = publicRouteCache.get(cacheKey);
+
+  if (!cachedEntry) {
+    return null;
+  }
+
+  if (cachedEntry.expiresAt <= Date.now()) {
+    publicRouteCache.delete(cacheKey);
+    return null;
+  }
+
+  return cachedEntry.payload;
+}
+
+function setCachedPublicRoutePayload(cacheKey, payload) {
+  publicRouteCache.set(cacheKey, {
+    expiresAt: Date.now() + PUBLIC_ROUTE_CACHE_TTL_MS,
+    payload
+  });
+}
+
 router.get("/hotel/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const cacheKey = `hotel:${slug}`;
+    const cachedPayload = getCachedPublicRoutePayload(cacheKey);
+
+    if (cachedPayload) {
+      res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+      return res.json(cachedPayload);
+    }
 
     const { data, error } = await supabase
       .from("hotel_profiles")
@@ -96,10 +128,14 @@ router.get("/hotel/:slug", async (req, res) => {
       });
     }
 
-    res.json({
+    const payload = {
       success: true,
       hotel: data
-    });
+    };
+
+    setCachedPublicRoutePayload(cacheKey, payload);
+    res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+    res.json(payload);
   } catch (error) {
     console.error("Public hotel fetch error:", error);
     res.status(500).json({
@@ -112,6 +148,13 @@ router.get("/hotel/:slug", async (req, res) => {
 router.get("/menu/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const cacheKey = `menu:${slug}`;
+    const cachedPayload = getCachedPublicRoutePayload(cacheKey);
+
+    if (cachedPayload) {
+      res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+      return res.json(cachedPayload);
+    }
 
     const { data, error } = await supabase
       .from("menu_items")
@@ -145,10 +188,14 @@ router.get("/menu/:slug", async (req, res) => {
       });
     }
 
-    res.json({
+    const payload = {
       success: true,
       menu: groupedMenu
-    });
+    };
+
+    setCachedPublicRoutePayload(cacheKey, payload);
+    res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+    res.json(payload);
   } catch (error) {
     console.error("Public menu fetch error:", error);
     res.status(500).json({
@@ -161,6 +208,13 @@ router.get("/menu/:slug", async (req, res) => {
 router.get("/gallery/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const cacheKey = `gallery:${slug}`;
+    const cachedPayload = getCachedPublicRoutePayload(cacheKey);
+
+    if (cachedPayload) {
+      res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+      return res.json(cachedPayload);
+    }
 
     const { data, error } = await supabase
       .from("gallery_items")
@@ -173,7 +227,7 @@ router.get("/gallery/:slug", async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    const payload = {
       success: true,
       gallery: (data || []).map((item) => ({
         id: item.id,
@@ -183,7 +237,11 @@ router.get("/gallery/:slug", async (req, res) => {
         layoutVariant: item.layout_variant || "standard",
         sortOrder: Number(item.sort_order || 0)
       }))
-    });
+    };
+
+    setCachedPublicRoutePayload(cacheKey, payload);
+    res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+    res.json(payload);
   } catch (error) {
     console.error("Public gallery fetch error:", error);
     res.status(500).json({
@@ -196,6 +254,13 @@ router.get("/gallery/:slug", async (req, res) => {
 router.get("/testimonials/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const cacheKey = `testimonials:${slug}`;
+    const cachedPayload = getCachedPublicRoutePayload(cacheKey);
+
+    if (cachedPayload) {
+      res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+      return res.json(cachedPayload);
+    }
 
     const { data, error } = await supabase
       .from("testimonials")
@@ -204,10 +269,14 @@ router.get("/testimonials/:slug", async (req, res) => {
 
     if (error) {
       if (isMissingTestimonialsRelationError(error)) {
-        return res.json({
+        const payload = {
           success: true,
           testimonials: []
-        });
+        };
+
+        setCachedPublicRoutePayload(cacheKey, payload);
+        res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+        return res.json(payload);
       }
 
       throw error;
@@ -245,10 +314,14 @@ router.get("/testimonials/:slug", async (req, res) => {
       }))
       .filter((item) => item.name && item.text);
 
-    res.json({
+    const payload = {
       success: true,
       testimonials
-    });
+    };
+
+    setCachedPublicRoutePayload(cacheKey, payload);
+    res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+    res.json(payload);
   } catch (error) {
     console.error("Public testimonials fetch error:", error);
     res.status(500).json({
