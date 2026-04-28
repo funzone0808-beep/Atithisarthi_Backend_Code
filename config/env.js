@@ -11,8 +11,8 @@ function getRequiredEnv(name) {
 }
 
 const env = {
-  nodeEnv: getEnv("NODE_ENV", "production"),
-  port: Number(getEnv("PORT", "10000")),
+nodeEnv: getEnv("NODE_ENV", "production"),
+port: Number(getEnv("PORT", "10000")),
 
   supabaseUrl: getRequiredEnv("SUPABASE_URL"),
   supabaseServiceRoleKey: getRequiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
