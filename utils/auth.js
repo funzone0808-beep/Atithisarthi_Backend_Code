@@ -3,6 +3,20 @@ const { env } = require("../config/env");
 
 const ADMIN_TOKEN_SCOPE = "admin";
 const STAFF_TOKEN_SCOPE = "hotel_staff";
+const STAFF_OWNER_ROLE = "owner";
+const STAFF_BASIC_ROLE = "staff";
+
+function normalizeStaffRole(role = "") {
+  const normalizedRole = String(role || "")
+    .trim()
+    .toLowerCase();
+
+  return normalizedRole === STAFF_OWNER_ROLE ? STAFF_OWNER_ROLE : STAFF_BASIC_ROLE;
+}
+
+function isStaffManagerRole(role = "") {
+  return normalizeStaffRole(role) === STAFF_OWNER_ROLE;
+}
 
 function signAdminToken(adminUser) {
   return jwt.sign(
@@ -34,7 +48,7 @@ function signStaffToken(staffAccess) {
   const hotelSlug = String(
     staffAccess?.hotel_slug || staffAccess?.hotelSlug || ""
   ).trim();
-  const role = String(staffAccess?.role || "staff").trim().toLowerCase();
+  const role = normalizeStaffRole(staffAccess?.role);
 
   if (!staffId || !hotelSlug) {
     throw new Error("Staff token requires staff id and hotel slug");
@@ -46,7 +60,7 @@ function signStaffToken(staffAccess) {
       scope: STAFF_TOKEN_SCOPE,
       hotelSlug,
       displayName: staffAccess.display_name || staffAccess.displayName || "Staff",
-      role: role === "owner" ? "owner" : "staff"
+      role
     },
     env.jwtSecret,
     {
@@ -62,7 +76,11 @@ function verifyStaffToken(token) {
     throw new Error("Invalid staff token scope");
   }
 
-  return decoded;
+  return {
+    ...decoded,
+    role: normalizeStaffRole(decoded.role),
+    isManager: isStaffManagerRole(decoded.role)
+  };
 }
 
 module.exports = {
@@ -71,5 +89,9 @@ module.exports = {
   signStaffToken,
   verifyStaffToken,
   ADMIN_TOKEN_SCOPE,
-  STAFF_TOKEN_SCOPE
+  STAFF_TOKEN_SCOPE,
+  STAFF_OWNER_ROLE,
+  STAFF_BASIC_ROLE,
+  normalizeStaffRole,
+  isStaffManagerRole
 };

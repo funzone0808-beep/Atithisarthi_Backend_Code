@@ -14,6 +14,7 @@ const env = {
 nodeEnv: getEnv("NODE_ENV", "production"),
 port: Number(getEnv("PORT", "10000")),
 
+
   supabaseUrl: getRequiredEnv("SUPABASE_URL"),
   supabaseServiceRoleKey: getRequiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
 
@@ -22,7 +23,7 @@ port: Number(getEnv("PORT", "10000")),
   qrContextSigningSecret: getEnv("QR_CONTEXT_SIGNING_SECRET", ""),
   qrContextStrictRequired:
     getEnv("QR_CONTEXT_STRICT_REQUIRED", "false") === "true",
-  frontendUrl: getEnv("FRONTEND_URL", " "),
+   frontendUrl: getEnv("FRONTEND_URL", " "),
   adminUrl: getEnv("ADMIN_URL", " "),
   notificationDeliveryEnabled:
     getEnv("NOTIFICATION_DELIVERY_ENABLED", "false") === "true",

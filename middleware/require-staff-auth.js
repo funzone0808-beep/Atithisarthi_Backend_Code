@@ -1,4 +1,4 @@
-const { verifyStaffToken } = require("../utils/auth");
+const { verifyStaffToken, normalizeStaffRole, isStaffManagerRole } = require("../utils/auth");
 
 function requireStaffAuth(req, res, next) {
   try {
@@ -21,8 +21,15 @@ function requireStaffAuth(req, res, next) {
     }
 
     const decoded = verifyStaffToken(token);
-    req.staffUser = decoded;
+    const normalizedRole = normalizeStaffRole(decoded.role);
+    req.staffUser = {
+      ...decoded,
+      role: normalizedRole,
+      isManager: isStaffManagerRole(normalizedRole)
+    };
     req.staffHotelSlug = decoded.hotelSlug;
+    req.staffRole = normalizedRole;
+    req.staffCanViewManagerData = isStaffManagerRole(normalizedRole);
     next();
   } catch (error) {
     return res.status(401).json({
@@ -32,4 +39,16 @@ function requireStaffAuth(req, res, next) {
   }
 }
 
-module.exports = { requireStaffAuth };
+function requireStaffManagerAccess(req, res, next) {
+  if (req.staffCanViewManagerData || req.staffUser?.isManager) {
+    next();
+    return;
+  }
+
+  return res.status(403).json({
+    success: false,
+    message: "Manager access is required for this staff section"
+  });
+}
+
+module.exports = { requireStaffAuth, requireStaffManagerAccess };

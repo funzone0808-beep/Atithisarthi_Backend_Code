@@ -1,8 +1,8 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const { supabase } = require("../utils/supabase");
-const { signStaffToken } = require("../utils/auth");
-const { requireStaffAuth } = require("../middleware/require-staff-auth");
+const { signStaffToken, normalizeStaffRole, isStaffManagerRole } = require("../utils/auth");
+const { requireStaffAuth, requireStaffManagerAccess } = require("../middleware/require-staff-auth");
 const { validateBody } = require("../validators/common");
 const { staffLoginSchema } = require("../validators/staff");
 
@@ -272,20 +272,26 @@ function buildStaffRouteTransferResponse(order = {}) {
 }
 
 function buildStaffUserResponse(staffAccess) {
+  const role = normalizeStaffRole(staffAccess.role);
+
   return {
     id: staffAccess.id,
     hotelSlug: staffAccess.hotel_slug,
     displayName: staffAccess.display_name || "Staff",
-    role: staffAccess.role === "owner" ? "owner" : "staff"
+    role,
+    isManager: isStaffManagerRole(role)
   };
 }
 
 function buildStaffSessionResponse(staffUser = {}) {
+  const role = normalizeStaffRole(staffUser.role);
+
   return {
     id: staffUser.sub || staffUser.id || "",
     hotelSlug: staffUser.hotelSlug || staffUser.hotel_slug || "",
     displayName: staffUser.displayName || staffUser.display_name || "Staff",
-    role: staffUser.role === "owner" ? "owner" : "staff"
+    role,
+    isManager: isStaffManagerRole(role)
   };
 }
 
@@ -789,7 +795,7 @@ router.get("/orders", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.get("/orders-reports", requireStaffAuth, async (req, res) => {
+router.get("/orders-reports", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
 
@@ -820,7 +826,7 @@ router.get("/orders-reports", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.get("/reservations", requireStaffAuth, async (req, res) => {
+router.get("/reservations", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
 
@@ -867,7 +873,7 @@ router.get("/reservations", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.get("/inquiries", requireStaffAuth, async (req, res) => {
+router.get("/inquiries", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
 
@@ -914,7 +920,7 @@ router.get("/inquiries", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.get("/contact-submissions", requireStaffAuth, async (req, res) => {
+router.get("/contact-submissions", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
 
@@ -1032,7 +1038,7 @@ router.get("/support-requests", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.get("/testimonials", requireStaffAuth, async (req, res) => {
+router.get("/testimonials", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
 
@@ -1092,7 +1098,7 @@ router.get("/testimonials", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.patch("/reservations/:id/status", requireStaffAuth, async (req, res) => {
+router.patch("/reservations/:id/status", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   await updateStaffScopedRecordStatus(req, res, {
     table: "reservations",
     label: "Reservation",
@@ -1102,7 +1108,7 @@ router.patch("/reservations/:id/status", requireStaffAuth, async (req, res) => {
   });
 });
 
-router.patch("/inquiries/:id/status", requireStaffAuth, async (req, res) => {
+router.patch("/inquiries/:id/status", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   await updateStaffScopedRecordStatus(req, res, {
     table: "inquiries",
     label: "Inquiry",
@@ -1112,7 +1118,7 @@ router.patch("/inquiries/:id/status", requireStaffAuth, async (req, res) => {
   });
 });
 
-router.patch("/contact-submissions/:id/status", requireStaffAuth, async (req, res) => {
+router.patch("/contact-submissions/:id/status", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   await updateStaffScopedRecordStatus(req, res, {
     table: "contact_submissions",
     label: "Contact message",
@@ -1136,7 +1142,7 @@ router.patch("/support-requests/:id/status", requireStaffAuth, async (req, res) 
   });
 });
 
-router.patch("/testimonials/:id/approval", requireStaffAuth, async (req, res) => {
+router.patch("/testimonials/:id/approval", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
     const testimonialId = String(req.params.id || "").trim();
