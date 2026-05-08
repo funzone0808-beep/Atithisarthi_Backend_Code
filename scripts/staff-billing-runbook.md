@@ -86,6 +86,7 @@ From `backend`, you can dry-run the staff billing read shape for one hotel with:
 
 ```powershell
 npm run verify:staff-billing -- hotel-example
+npm run verify:staff-billing-permissions
 ```
 
 Expected result:
@@ -94,10 +95,11 @@ Expected result:
 - Order table/billing/table columns are readable.
 - No database writes are made.
 - Recent orders are printed only for the selected hotel slug.
+- Billing and payment actions are still verified as manager-only.
 
 ## 6. Billing action test
 
-Use one safe test order first:
+Use one safe test order first with an owner/manager staff login:
 
 - Click `Mark Billed`.
 - Confirm the browser prompt.
@@ -111,6 +113,11 @@ Expected result:
 - The order remains in the same hotel list.
 - Bill number appears after billing when the database billing columns are ready.
 - Re-clicking an already billed/paid action should be disabled in the UI.
+
+Also confirm with a basic staff login:
+
+- `Mark Billed`, `Mark Paid`, `Mark Full Table Billed`, and `Mark Full Table Paid` are not shown.
+- `View Bill` is still available.
 
 ## 7. View bill test
 

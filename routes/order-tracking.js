@@ -791,6 +791,24 @@ router.post("/:hotelSlug/:orderId/support-requests", trackingSupportLimiter, asy
       throw supportRequestError;
     }
 
+    void createNotificationEventSafely({
+      hotelSlug: supportRequest.hotel_slug || data.hotel_slug || hotelSlug,
+      sourceType: "support_request",
+      sourceId: supportRequest.id,
+      payload: {
+        supportRequestId: supportRequest.id,
+        hotelName: supportRequest.hotel_name || data.hotel_name || "",
+        hotelSlug: supportRequest.hotel_slug || data.hotel_slug || hotelSlug || "",
+        orderId: String(supportRequest.order_id || data.id || orderId),
+        tableNumber: supportRequest.table_number || data.table_number || "",
+        requestType: supportRequest.request_type || requestType,
+        status: supportRequest.status || "new",
+        orderStatus: supportRequest.order_status || data.status || "new",
+        message: supportRequest.message || insertPayload.message,
+        source: supportRequest.source || "order_tracking"
+      }
+    });
+
     res.status(201).json({
       success: true,
       saved: true,

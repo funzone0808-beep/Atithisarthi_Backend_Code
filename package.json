@@ -6,17 +6,26 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "prepare:frontend-runtime-config": "node scripts/prepare-frontend-runtime-config.js",
+    "reset:frontend-runtime-config": "node scripts/reset-frontend-runtime-config.js",
+    "verify:frontend-runtime-config": "node scripts/verify-frontend-runtime-config.js",
+    "verify:frontend-runtime-config-neutral": "node scripts/verify-frontend-runtime-config-neutral.js",
     "verify:qr-link": "node scripts/verify-qr-table-link.js",
     "verify:billing-schema": "node scripts/verify-order-billing-columns.js",
+    "verify:notification-events": "node scripts/verify-notification-events-schema.js",
     "verify:payment-gateway-schema": "node scripts/verify-order-payment-gateway-columns.js",
+    "verify:payment-gateway-ids": "node scripts/verify-payment-gateway-id-uniqueness.js",
     "verify:payment-gateway-config": "node scripts/verify-payment-gateway-config.js",
     "verify:payment-gateway-readiness": "node scripts/verify-payment-gateway-readiness.js",
     "verify:payment-route-hotel": "node scripts/verify-payment-route-hotel-readiness.js",
     "verify:payment-webhook-local": "node scripts/verify-payment-webhook-local.js",
     "verify:production-config": "node scripts/verify-production-config.js",
+    "verify:first-client-launch-profile": "node scripts/verify-first-client-launch-profile.js",
     "verify:dine-in-billing": "node scripts/verify-dine-in-billing-flow.js",
     "verify:staff-access": "node scripts/verify-staff-access-schema.js",
-    "verify:staff-billing": "node scripts/verify-staff-billing-flow.js"
+    "verify:staff-billing": "node scripts/verify-staff-billing-flow.js",
+    "verify:staff-billing-permissions": "node scripts/verify-staff-billing-permissions.js",
+    "verify:tenant-domain-trust": "node scripts/verify-tenant-domain-trust.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",

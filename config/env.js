@@ -11,7 +11,7 @@ function getRequiredEnv(name) {
 }
 
 const env = {
-nodeEnv: getEnv("NODE_ENV", "production"),
+nodeEnv: getEnv("NODE_ENV", "Production"),
 port: Number(getEnv("PORT", "10000")),
 
 
@@ -23,7 +23,8 @@ port: Number(getEnv("PORT", "10000")),
   qrContextSigningSecret: getEnv("QR_CONTEXT_SIGNING_SECRET", ""),
   qrContextStrictRequired:
     getEnv("QR_CONTEXT_STRICT_REQUIRED", "false") === "true",
-   frontendUrl: getEnv("FRONTEND_URL", " "),
+  frontendUrl: getEnv("FRONTEND_URL", " "),
+  frontendOrigins: getEnv("FRONTEND_ORIGINS", ""),
   adminUrl: getEnv("ADMIN_URL", " "),
   notificationDeliveryEnabled:
     getEnv("NOTIFICATION_DELIVERY_ENABLED", "false") === "true",

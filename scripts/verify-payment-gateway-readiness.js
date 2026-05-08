@@ -72,21 +72,50 @@ function readFrontendGatewayFlags() {
   if (!fs.existsSync(FRONTEND_CONFIG_PATH)) {
     return {
       exists: false,
+      configMode: "missing",
       enabled: false,
       checkoutEnabled: false,
       provider: "",
-      scriptUrl: ""
+      scriptUrl: "",
+      needsRuntimeBrowserCheck: false
     };
   }
 
   const source = fs.readFileSync(FRONTEND_CONFIG_PATH, "utf8");
+  const usesRuntimeConfig =
+    source.includes("window.APP_RUNTIME_CONFIG") ||
+    source.includes("existingConfig.PAYMENT_GATEWAY_ENABLED") ||
+    source.includes("existingConfig.PAYMENT_GATEWAY_CHECKOUT_ENABLED");
   const getBooleanFlag = (name) => {
-    const match = source.match(new RegExp(`${name}\\s*:\\s*(true|false)`, "i"));
-    return match ? match[1].toLowerCase() === "true" : false;
+    const staticMatch = source.match(
+      new RegExp(`${name}\\s*:\\s*(true|false)`, "i")
+    );
+
+    if (staticMatch) {
+      return staticMatch[1].toLowerCase() === "true";
+    }
+
+    const runtimeFallbackMatch = source.match(
+      new RegExp(
+        `${name}\\s*:\\s*[\\s\\S]{0,220}?:\\s*(true|false)`,
+        "i"
+      )
+    );
+
+    return runtimeFallbackMatch
+      ? runtimeFallbackMatch[1].toLowerCase() === "true"
+      : false;
   };
   const getStringFlag = (name, fallbackPattern = null, fallbackValue = "") => {
-    const match = source.match(new RegExp(`${name}\\s*:\\s*["']([^"']+)["']`, "i"));
-    if (match) return match[1];
+    const directMatch = source.match(
+      new RegExp(`${name}\\s*:\\s*["']([^"']+)["']`, "i")
+    );
+    if (directMatch) return directMatch[1];
+
+    const runtimeFallbackMatch = source.match(
+      new RegExp(`${name}\\s*:\\s*[\\s\\S]{0,220}?\\|\\|\\s*["']([^"']+)["']`, "i")
+    );
+    if (runtimeFallbackMatch) return runtimeFallbackMatch[1];
 
     if (
       fallbackPattern &&
@@ -101,6 +130,7 @@ function readFrontendGatewayFlags() {
 
   return {
     exists: true,
+    configMode: usesRuntimeConfig ? "runtime-config-driven" : "static-source",
     enabled: getBooleanFlag("PAYMENT_GATEWAY_ENABLED"),
     checkoutEnabled: getBooleanFlag("PAYMENT_GATEWAY_CHECKOUT_ENABLED"),
     provider: getStringFlag("PAYMENT_GATEWAY_PROVIDER", /razorpay/i, "razorpay"),
@@ -108,7 +138,8 @@ function readFrontendGatewayFlags() {
       "PAYMENT_GATEWAY_SCRIPT_URL",
       /https:\/\/checkout\.razorpay\.com\/v1\/checkout\.js/i,
       "https://checkout.razorpay.com/v1/checkout.js"
-    )
+    ),
+    needsRuntimeBrowserCheck: usesRuntimeConfig
   };
 }
 
@@ -267,10 +298,14 @@ async function main() {
   console.log(
     `Frontend config: ${frontendFlags.exists ? "found" : "missing"}`
   );
+  console.log(`Frontend config mode: ${frontendFlags.configMode}`);
   console.log(
     `Frontend gateway flags: enabled=${frontendFlags.enabled}, checkout=${frontendFlags.checkoutEnabled}, provider=${frontendFlags.provider || "missing"}`
   );
   console.log(`Frontend script URL: ${frontendFlags.scriptUrl || "missing"}`);
+  if (frontendFlags.needsRuntimeBrowserCheck) {
+    console.log("Frontend runtime note: deployed payment flags must be confirmed in-browser because this frontend uses runtime config hooks.");
+  }
   console.log("");
   console.log("No live payment was attempted by this check.");
 
@@ -308,15 +343,27 @@ async function main() {
     issues.push(gatewaySafetyIssue);
   }
 
-  if (frontendFlags.checkoutEnabled && !backendEnabled) {
+  if (
+    frontendFlags.configMode === "static-source" &&
+    frontendFlags.checkoutEnabled &&
+    !backendEnabled
+  ) {
     issues.push("Frontend checkout is enabled but backend PAYMENT_GATEWAY_ENABLED is false.");
   }
 
-  if (frontendFlags.enabled && frontendFlags.provider !== "razorpay") {
+  if (
+    frontendFlags.configMode === "static-source" &&
+    frontendFlags.enabled &&
+    frontendFlags.provider !== "razorpay"
+  ) {
     issues.push("Frontend PAYMENT_GATEWAY_PROVIDER must be razorpay for the current integration.");
   }
 
-  if (frontendFlags.enabled && !frontendFlags.scriptUrl) {
+  if (
+    frontendFlags.configMode === "static-source" &&
+    frontendFlags.enabled &&
+    !frontendFlags.scriptUrl
+  ) {
     issues.push("Frontend PAYMENT_GATEWAY_SCRIPT_URL is missing.");
   }
 
@@ -327,14 +374,21 @@ async function main() {
     process.exit(1);
   }
 
+  const frontendAppearsCheckoutReady =
+    frontendFlags.configMode === "runtime-config-driven"
+      ? Boolean(frontendFlags.provider === "razorpay" && frontendFlags.scriptUrl)
+      : Boolean(
+          frontendFlags.enabled &&
+            frontendFlags.checkoutEnabled &&
+            frontendFlags.provider === "razorpay"
+        );
+
   const readyForEndToEndTest =
     backendEnabled &&
     Boolean(keyId && keySecret) &&
     Boolean(webhookSecret) &&
     keyId.startsWith("rzp_test_") &&
-    frontendFlags.enabled &&
-    frontendFlags.checkoutEnabled &&
-    frontendFlags.provider === "razorpay" &&
+    frontendAppearsCheckoutReady &&
     schemaCheck.ok &&
     webhookSchemaCheck.ok;
 

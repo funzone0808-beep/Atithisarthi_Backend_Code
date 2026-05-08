@@ -11,6 +11,7 @@ const STAFF_ORDER_RANGES = ["today", "week", "month", "recent", "all"];
 const STAFF_ORDERS_DEFAULT_LIMIT = 50;
 const STAFF_ORDERS_MAX_LIMIT = 200;
 const STAFF_REPORT_BATCH_SIZE = 500;
+const STAFF_ITEM_REPORT_LIMIT = 5;
 const STAFF_ORDER_STATUSES = ["new", "confirmed", "preparing", "completed", "cancelled"];
 const STAFF_RESERVATION_STATUSES = ["new", "confirmed", "seated", "completed", "cancelled"];
 const STAFF_INQUIRY_STATUSES = ["new", "contacted", "converted", "closed"];
@@ -500,6 +501,205 @@ function buildStaffOperationalReports(orders = [], starts = getStaffOperationalR
   return reports;
 }
 
+function normalizeStaffItemId(item = {}) {
+  return String(item?.id || item?.itemId || item?.item_id || "")
+    .trim()
+    .slice(0, 120);
+}
+
+function normalizeStaffItemName(item = {}, fallback = "Unnamed item") {
+  const name = String(item?.name || item?.itemName || item?.item_name || "")
+    .trim()
+    .slice(0, 160);
+
+  return name || fallback;
+}
+
+function getStaffItemQuantity(item = {}) {
+  const quantity =
+    getStaffNumberValue(item?.qty) ??
+    getStaffNumberValue(item?.quantity) ??
+    0;
+
+  return quantity > 0 ? quantity : 0;
+}
+
+function getStaffItemRevenue(item = {}) {
+  const explicitLineTotal = getStaffNumberValue(item?.lineTotal);
+
+  if (explicitLineTotal !== null && explicitLineTotal >= 0) {
+    return explicitLineTotal;
+  }
+
+  const quantity = getStaffItemQuantity(item);
+  const price = getStaffNumberValue(item?.price) || 0;
+  return quantity * price;
+}
+
+function createStaffItemSalesSummary() {
+  return {
+    totalDistinctItems: 0,
+    totalUnitsSold: 0,
+    totalRevenue: 0,
+    topItems: [],
+    lowItems: []
+  };
+}
+
+function addStaffOrderItemsToSalesMap(itemsMap, order = {}) {
+  if (!(itemsMap instanceof Map) || !Array.isArray(order.items)) {
+    return itemsMap;
+  }
+
+  const orderId = String(order.id || "").trim();
+  const createdAt = String(order.created_at || "").trim();
+  const sourceKey = getStaffOrderReportSourceKey(order);
+
+  order.items.forEach((item) => {
+    const itemId = normalizeStaffItemId(item);
+    const itemName = normalizeStaffItemName(item, itemId || "Unnamed item");
+    const quantity = getStaffItemQuantity(item);
+    const revenue = getStaffItemRevenue(item);
+
+    if (!itemId || !itemName || quantity <= 0) {
+      return;
+    }
+
+    const existing = itemsMap.get(itemId) || {
+      itemId,
+      itemName,
+      quantitySold: 0,
+      revenue: 0,
+      orderCount: 0,
+      qrOrders: 0,
+      websiteOrders: 0,
+      qrRevenue: 0,
+      websiteRevenue: 0,
+      lastOrderedAt: "",
+      orderIds: new Set()
+    };
+
+    existing.quantitySold += quantity;
+    existing.revenue += revenue;
+
+    if (sourceKey === "qr-table") {
+      existing.qrOrders += 1;
+      existing.qrRevenue += revenue;
+    } else {
+      existing.websiteOrders += 1;
+      existing.websiteRevenue += revenue;
+    }
+
+    if (orderId && !existing.orderIds.has(orderId)) {
+      existing.orderIds.add(orderId);
+      existing.orderCount += 1;
+    }
+
+    if (createdAt && (!existing.lastOrderedAt || createdAt > existing.lastOrderedAt)) {
+      existing.lastOrderedAt = createdAt;
+    }
+
+    itemsMap.set(itemId, existing);
+  });
+
+  return itemsMap;
+}
+
+function finalizeStaffItemSalesEntries(itemsMap) {
+  if (!(itemsMap instanceof Map)) {
+    return [];
+  }
+
+  return [...itemsMap.values()]
+    .map((entry) => ({
+      itemId: entry.itemId,
+      itemName: entry.itemName,
+      quantitySold: entry.quantitySold,
+      revenue: entry.revenue,
+      orderCount: entry.orderCount,
+      qrOrders: entry.qrOrders,
+      websiteOrders: entry.websiteOrders,
+      qrRevenue: entry.qrRevenue,
+      websiteRevenue: entry.websiteRevenue,
+      lastOrderedAt: entry.lastOrderedAt || ""
+    }))
+    .filter((entry) => entry.itemId && entry.quantitySold > 0);
+}
+
+function sortStaffTopSellingItems(entries = []) {
+  return [...entries].sort((left, right) => (
+    right.quantitySold - left.quantitySold ||
+    right.revenue - left.revenue ||
+    right.orderCount - left.orderCount ||
+    left.itemName.localeCompare(right.itemName)
+  ));
+}
+
+function sortStaffLowSellingItems(entries = []) {
+  return [...entries].sort((left, right) => (
+    left.quantitySold - right.quantitySold ||
+    left.revenue - right.revenue ||
+    left.orderCount - right.orderCount ||
+    left.itemName.localeCompare(right.itemName)
+  ));
+}
+
+function buildStaffItemSalesSummary(orders = []) {
+  const itemsMap = new Map();
+
+  orders.forEach((order) => {
+    addStaffOrderItemsToSalesMap(itemsMap, order);
+  });
+
+  const entries = finalizeStaffItemSalesEntries(itemsMap);
+  const topItems = sortStaffTopSellingItems(entries).slice(0, STAFF_ITEM_REPORT_LIMIT);
+  const lowItems = sortStaffLowSellingItems(entries).slice(0, STAFF_ITEM_REPORT_LIMIT);
+
+  return {
+    totalDistinctItems: entries.length,
+    totalUnitsSold: entries.reduce((sum, entry) => sum + entry.quantitySold, 0),
+    totalRevenue: entries.reduce((sum, entry) => sum + entry.revenue, 0),
+    topItems,
+    lowItems
+  };
+}
+
+function buildStaffItemSalesReports(orders = [], starts = getStaffOperationalReportStarts()) {
+  const periods = {
+    today: [],
+    week: [],
+    month: []
+  };
+
+  orders.forEach((order) => {
+    const createdAtValue = order?.created_at ? new Date(order.created_at) : null;
+    if (!createdAtValue || Number.isNaN(createdAtValue.getTime())) return;
+
+    if (createdAtValue >= starts.todayStart) {
+      periods.today.push(order);
+    }
+
+    if (createdAtValue >= starts.weekStart) {
+      periods.week.push(order);
+    }
+
+    if (createdAtValue >= starts.monthStart) {
+      periods.month.push(order);
+    }
+  });
+
+  return {
+    today: buildStaffItemSalesSummary(periods.today),
+    week: buildStaffItemSalesSummary(periods.week),
+    month: buildStaffItemSalesSummary(periods.month),
+    basis: {
+      reportLimit: STAFF_ITEM_REPORT_LIMIT,
+      lowItemsMeaning:
+        "Low-selling items are ranked only among items that were sold in the selected report window."
+    }
+  };
+}
+
 function buildStaffOrderResponse(order = {}) {
   return {
     id: order.id,
@@ -822,6 +1022,37 @@ router.get("/orders-reports", requireStaffAuth, requireStaffManagerAccess, async
     res.status(500).json({
       success: false,
       message: "Failed to fetch staff order reports"
+    });
+  }
+});
+
+router.get("/orders-item-sales-reports", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
+  try {
+    const hotelSlug = String(req.staffHotelSlug || "").trim();
+
+    if (!hotelSlug) {
+      return res.status(403).json({
+        success: false,
+        message: "Staff hotel scope is missing"
+      });
+    }
+
+    const reportStarts = getStaffOperationalReportStarts();
+    const orders = await fetchStaffOrdersForReports({
+      hotelSlug,
+      startDate: reportStarts.earliestStart
+    });
+
+    res.json({
+      success: true,
+      hotelSlug,
+      itemSalesReports: buildStaffItemSalesReports(orders, reportStarts)
+    });
+  } catch (error) {
+    console.error("Staff item sales reports fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch staff item sales reports"
     });
   }
 });
@@ -1270,7 +1501,7 @@ router.patch("/orders/:id/status", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.patch("/orders/:id/mark-billed", requireStaffAuth, async (req, res) => {
+router.patch("/orders/:id/mark-billed", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
     const orderId = String(req.params.id || "").trim();
@@ -1360,7 +1591,7 @@ router.patch("/orders/:id/mark-billed", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.patch("/orders/:id/mark-paid", requireStaffAuth, async (req, res) => {
+router.patch("/orders/:id/mark-paid", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
     const orderId = String(req.params.id || "").trim();
@@ -1445,7 +1676,7 @@ router.patch("/orders/:id/mark-paid", requireStaffAuth, async (req, res) => {
   }
 });
 
-router.patch("/orders/:id/mark-family-billed", requireStaffAuth, async (req, res) => {
+router.patch("/orders/:id/mark-family-billed", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
     const orderId = String(req.params.id || "").trim();
@@ -1528,7 +1759,7 @@ router.patch("/orders/:id/mark-family-billed", requireStaffAuth, async (req, res
   }
 });
 
-router.patch("/orders/:id/mark-family-paid", requireStaffAuth, async (req, res) => {
+router.patch("/orders/:id/mark-family-paid", requireStaffAuth, requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
     const orderId = String(req.params.id || "").trim();

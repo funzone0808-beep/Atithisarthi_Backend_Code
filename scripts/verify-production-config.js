@@ -5,8 +5,33 @@ const path = require("path");
 
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const FRONTEND_CONFIG_PATH = path.join(PROJECT_ROOT, "frontend/js/app-config.js");
+const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const SERVER_PATH = path.join(PROJECT_ROOT, "backend/server.js");
 const PAYMENT_WEBHOOKS_ROUTE_PATH = path.join(PROJECT_ROOT, "backend/routes/payment-webhooks.js");
+const LEGACY_PRODUCTION_BACKEND_URL =
+  "https://my-projectbackendpaymentgateway-production.up.railway.app";
+const FRONTEND_RUNTIME_PAGES = [
+  {
+    pageName: "index.html",
+    requireContactSheetTag: true
+  },
+  {
+    pageName: "menu.html",
+    requireContactSheetTag: false
+  },
+  {
+    pageName: "admin.html",
+    requireContactSheetTag: false
+  },
+  {
+    pageName: "staff-orders.html",
+    requireContactSheetTag: false
+  },
+  {
+    pageName: "order-tracking.html",
+    requireContactSheetTag: false
+  }
+];
 
 function getEnv(name, fallback = "") {
   return process.env[name] || fallback;
@@ -14,6 +39,11 @@ function getEnv(name, fallback = "") {
 
 function getBooleanEnv(name) {
   return String(getEnv(name, "false")).trim().toLowerCase() === "true";
+}
+
+function isExplicitBooleanText(value = "") {
+  const normalizedValue = String(value || "").trim().toLowerCase();
+  return normalizedValue === "true" || normalizedValue === "false";
 }
 
 function isHttpsUrl(value = "") {
@@ -59,6 +89,43 @@ function addWarning(list, message) {
   list.push(message);
 }
 
+function cleanText(value, fallback = "") {
+  return typeof value === "string" && value.trim()
+    ? value.trim()
+    : fallback;
+}
+
+function normalizeUrl(value, fallback = "") {
+  const normalizedValue = cleanText(value, fallback);
+  return normalizedValue ? normalizedValue.replace(/\/+$/, "") : "";
+}
+
+function deriveApiBaseUrl(backendBaseUrl = "") {
+  return backendBaseUrl ? `${backendBaseUrl}/api` : "";
+}
+
+function isLegacyBackendUrl(value = "") {
+  return (
+    value === LEGACY_PRODUCTION_BACKEND_URL ||
+    value.startsWith(`${LEGACY_PRODUCTION_BACKEND_URL}/`)
+  );
+}
+
+function extractMetaContent(source, name) {
+  const match = source.match(
+    new RegExp(`<meta\\s+name="${name}"\\s+content="([^"]*)"\\s*\\/?>`, "i")
+  );
+
+  return match ? match[1].trim() : null;
+}
+
+function parseOriginList(value = "") {
+  return String(value || "")
+    .split(",")
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
 function getIndexOrInfinity(source, marker) {
   const index = source.indexOf(marker);
   return index === -1 ? Number.POSITIVE_INFINITY : index;
@@ -70,7 +137,8 @@ function checkRequiredProductionEnv(issues) {
     "SUPABASE_SERVICE_ROLE_KEY",
     "JWT_SECRET",
     "FRONTEND_URL",
-    "ADMIN_URL"
+    "ADMIN_URL",
+    "APP_BACKEND_BASE_URL"
   ];
 
   required.forEach((name) => {
@@ -97,6 +165,82 @@ function checkRequiredProductionEnv(issues) {
 
   if (String(getEnv("JWT_SECRET")).trim().length < 32) {
     addIssue(issues, "JWT_SECRET should be at least 32 characters for production.");
+  }
+
+  parseOriginList(getEnv("FRONTEND_ORIGINS")).forEach((origin, index) => {
+    if (!isHttpsUrl(origin)) {
+      addIssue(
+        issues,
+        `FRONTEND_ORIGINS entry ${index + 1} must be HTTPS in production.`
+      );
+    }
+
+    if (isLocalUrl(origin)) {
+      addIssue(
+        issues,
+        `FRONTEND_ORIGINS entry ${index + 1} must not point to localhost in production.`
+      );
+    }
+  });
+}
+
+function checkFrontendRuntimeEnv(issues) {
+  const appBackendBaseUrl = normalizeUrl(getEnv("APP_BACKEND_BASE_URL"));
+  const appApiBaseUrl = normalizeUrl(
+    getEnv("APP_API_BASE_URL"),
+    deriveApiBaseUrl(appBackendBaseUrl)
+  );
+  const contactSheetUrl = cleanText(getEnv("APP_CONTACT_SHEET_URL"));
+  const allowOrderWhatsAppFallbackOnSaveFailure = getEnv(
+    "APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE"
+  );
+  const openWhatsAppAfterVerifiedOnlinePayment = getEnv(
+    "APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT"
+  );
+
+  if (!appBackendBaseUrl) {
+    addIssue(issues, "APP_BACKEND_BASE_URL is required for frontend runtime config.");
+  } else {
+    if (!isHttpsUrl(appBackendBaseUrl)) {
+      addIssue(issues, "APP_BACKEND_BASE_URL must be HTTPS in production.");
+    }
+
+    if (isLocalUrl(appBackendBaseUrl)) {
+      addIssue(issues, "APP_BACKEND_BASE_URL must not point to localhost in production.");
+    }
+  }
+
+  if (!appApiBaseUrl) {
+    addIssue(
+      issues,
+      "APP_API_BASE_URL is required, or APP_BACKEND_BASE_URL must be set so it can be derived."
+    );
+  } else {
+    if (!isHttpsUrl(appApiBaseUrl)) {
+      addIssue(issues, "APP_API_BASE_URL must be HTTPS in production.");
+    }
+
+    if (isLocalUrl(appApiBaseUrl)) {
+      addIssue(issues, "APP_API_BASE_URL must not point to localhost in production.");
+    }
+  }
+
+  if (contactSheetUrl && !isHttpsUrl(contactSheetUrl)) {
+    addIssue(issues, "APP_CONTACT_SHEET_URL must be HTTPS when it is set for production.");
+  }
+
+  if (!isExplicitBooleanText(allowOrderWhatsAppFallbackOnSaveFailure)) {
+    addIssue(
+      issues,
+      "APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE must be explicitly set to true or false for production."
+    );
+  }
+
+  if (!isExplicitBooleanText(openWhatsAppAfterVerifiedOnlinePayment)) {
+    addIssue(
+      issues,
+      "APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT must be explicitly set to true or false for production."
+    );
   }
 }
 
@@ -175,13 +319,27 @@ function checkNotificationEnv(issues, warnings) {
   });
 }
 
-function checkFrontendConfig(warnings) {
+function checkFrontendConfig(issues, warnings) {
   if (!fs.existsSync(FRONTEND_CONFIG_PATH)) {
     addWarning(warnings, "frontend/js/app-config.js was not found.");
     return;
   }
 
   const source = fs.readFileSync(FRONTEND_CONFIG_PATH, "utf8");
+
+  if (source.includes(LEGACY_PRODUCTION_BACKEND_URL)) {
+    addIssue(
+      issues,
+      "frontend/js/app-config.js still contains the legacy Railway backend fallback URL."
+    );
+  }
+
+  if (source.includes('"legacy-production-fallback"')) {
+    addIssue(
+      issues,
+      "frontend/js/app-config.js still advertises the legacy-production-fallback runtime mode."
+    );
+  }
 
   if (source.includes('API_BASE_URL: "http://localhost:5000/api"')) {
     addWarning(
@@ -196,6 +354,144 @@ function checkFrontendConfig(warnings) {
       "frontend/js/app-config.js still contains an explicit localhost BACKEND_BASE_URL assignment."
     );
   }
+}
+
+function checkStampedFrontendRuntimePages(issues, warnings) {
+  const expectedBackendBaseUrl = normalizeUrl(getEnv("APP_BACKEND_BASE_URL"));
+  const expectedApiBaseUrl = normalizeUrl(
+    getEnv("APP_API_BASE_URL"),
+    deriveApiBaseUrl(expectedBackendBaseUrl)
+  );
+  const expectedContactSheetUrl = cleanText(getEnv("APP_CONTACT_SHEET_URL"));
+  const expectedAllowOrderWhatsAppFallbackOnSaveFailure = String(
+    getEnv("APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE")
+  ).trim().toLowerCase();
+  const expectedOpenWhatsAppAfterVerifiedOnlinePayment = String(
+    getEnv("APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT")
+  ).trim().toLowerCase();
+  const allowedLegacyRuntimeValues = new Set(
+    [expectedBackendBaseUrl, expectedApiBaseUrl].filter(Boolean)
+  );
+
+  FRONTEND_RUNTIME_PAGES.forEach(({ pageName, requireContactSheetTag }) => {
+    const filePath = path.join(FRONTEND_ROOT, pageName);
+
+    if (!fs.existsSync(filePath)) {
+      addIssue(issues, `Required frontend page was not found: ${pageName}`);
+      return;
+    }
+
+    const source = fs.readFileSync(filePath, "utf8");
+    const backendMetaValue = extractMetaContent(source, "app-backend-base-url");
+    const apiMetaValue = extractMetaContent(source, "app-api-base-url");
+    const contactSheetMetaValue = extractMetaContent(
+      source,
+      "app-contact-sheet-url"
+    );
+    const orderFallbackMetaValue = extractMetaContent(
+      source,
+      "app-allow-order-whatsapp-fallback-on-save-failure"
+    );
+    const verifiedPaymentWhatsAppMetaValue = extractMetaContent(
+      source,
+      "app-open-whatsapp-after-verified-online-payment"
+    );
+
+    if (backendMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-backend-base-url">.`
+      );
+    } else if (backendMetaValue !== expectedBackendBaseUrl) {
+      addIssue(
+        issues,
+        `${pageName} app-backend-base-url does not match APP_BACKEND_BASE_URL.`
+      );
+    }
+
+    if (apiMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-api-base-url">.`
+      );
+    } else if (apiMetaValue !== expectedApiBaseUrl) {
+      addIssue(
+        issues,
+        `${pageName} app-api-base-url does not match APP_API_BASE_URL.`
+      );
+    }
+
+    if (requireContactSheetTag) {
+      if (contactSheetMetaValue === null) {
+        addIssue(
+          issues,
+          `${pageName} is missing <meta name="app-contact-sheet-url">.`
+        );
+      } else if (contactSheetMetaValue !== expectedContactSheetUrl) {
+        addIssue(
+          issues,
+          `${pageName} app-contact-sheet-url does not match APP_CONTACT_SHEET_URL.`
+        );
+      }
+    }
+
+    if (orderFallbackMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-allow-order-whatsapp-fallback-on-save-failure">.`
+      );
+    } else if (
+      orderFallbackMetaValue !== expectedAllowOrderWhatsAppFallbackOnSaveFailure
+    ) {
+      addIssue(
+        issues,
+        `${pageName} app-allow-order-whatsapp-fallback-on-save-failure does not match APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE.`
+      );
+    }
+
+    if (verifiedPaymentWhatsAppMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-open-whatsapp-after-verified-online-payment">.`
+      );
+    } else if (
+      verifiedPaymentWhatsAppMetaValue !== expectedOpenWhatsAppAfterVerifiedOnlinePayment
+    ) {
+      addIssue(
+        issues,
+        `${pageName} app-open-whatsapp-after-verified-online-payment does not match APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT.`
+      );
+    }
+
+    [backendMetaValue, apiMetaValue].forEach((value) => {
+      if (!value) return;
+
+      if (isLegacyBackendUrl(value) && !allowedLegacyRuntimeValues.has(value)) {
+        addIssue(
+          issues,
+          `${pageName} still points to the legacy Railway backend fallback.`
+        );
+      }
+
+      if (isLocalUrl(value)) {
+        addIssue(
+          issues,
+          `${pageName} points to localhost in stamped frontend runtime config.`
+        );
+      }
+    });
+
+    if (
+      backendMetaValue &&
+      apiMetaValue &&
+      apiMetaValue !== deriveApiBaseUrl(backendMetaValue)
+    ) {
+      addWarning(
+        warnings,
+        `${pageName} app-api-base-url does not follow the usual backend + /api pattern. Confirm this split is intentional.`
+      );
+    }
+  });
 }
 
 function checkServerDeploymentHints(warnings) {
@@ -268,7 +564,17 @@ function run() {
   console.log(`NODE_ENV: ${nodeEnv}`);
   console.log(`PORT: ${getEnv("PORT", "5000")}`);
   console.log(`FRONTEND_URL: ${getEnv("FRONTEND_URL", "missing")}`);
+  console.log(`FRONTEND_ORIGINS: ${getEnv("FRONTEND_ORIGINS", "missing")}`);
   console.log(`ADMIN_URL: ${getEnv("ADMIN_URL", "missing")}`);
+  console.log(`APP_BACKEND_BASE_URL: ${getEnv("APP_BACKEND_BASE_URL", "missing")}`);
+  console.log(`APP_API_BASE_URL: ${getEnv("APP_API_BASE_URL", "missing")}`);
+  console.log(`APP_CONTACT_SHEET_URL: ${getEnv("APP_CONTACT_SHEET_URL", "missing")}`);
+  console.log(
+    `APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE: ${getEnv("APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE", "missing")}`
+  );
+  console.log(
+    `APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT: ${getEnv("APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT", "missing")}`
+  );
   console.log(`SUPABASE_URL: ${getEnv("SUPABASE_URL", "missing")}`);
   console.log(`PAYMENT_GATEWAY_ENABLED: ${getEnv("PAYMENT_GATEWAY_ENABLED", "false")}`);
   console.log(`RAZORPAY_KEY_ID: ${maskValue(getEnv("RAZORPAY_KEY_ID"))}`);
@@ -279,9 +585,11 @@ function run() {
   }
 
   checkRequiredProductionEnv(issues);
+  checkFrontendRuntimeEnv(issues);
   checkPaymentEnv(issues, warnings);
   checkNotificationEnv(issues, warnings);
-  checkFrontendConfig(warnings);
+  checkFrontendConfig(issues, warnings);
+  checkStampedFrontendRuntimePages(issues, warnings);
   checkServerDeploymentHints(warnings);
   checkWebhookMountSafety(issues, warnings);
 

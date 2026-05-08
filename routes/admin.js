@@ -20,7 +20,14 @@ const {
 } = require("../validators/admin");
 const { buildQrContextToken } = require("../utils/qr-context");
 
-const NOTIFICATION_EVENT_SOURCE_TYPES = ["order", "reservation", "inquiry"];
+const NOTIFICATION_EVENT_SOURCE_TYPES = [
+  "order",
+  "reservation",
+  "inquiry",
+  "contact_submission",
+  "testimonial",
+  "support_request"
+];
 const NOTIFICATION_EVENT_STATUSES = ["pending", "sent", "failed", "skipped"];
 const NOTIFICATION_EVENT_MAX_RETRIES = 3;
 const ORDER_STATUSES = ["new", "confirmed", "preparing", "completed", "cancelled"];

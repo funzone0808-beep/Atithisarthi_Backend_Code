@@ -1,6 +1,7 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
 const logger = require("../utils/logger");
+const { createNotificationEventSafely } = require("../utils/notifications");
 const {
   getPaymentGatewayConfig,
   verifyRazorpayWebhookSignature
@@ -270,6 +271,10 @@ async function markLinkedOrderPaidFromWebhook({ gatewayOrderId, gatewayPaymentId
     };
   }
 
+  const shouldCreateOperationalNotification =
+    order.status === "payment_pending" &&
+    order.payment_status !== "paid";
+
   const paidAt = new Date().toISOString();
   const updatePayload = {
     payment_gateway: "razorpay",
@@ -284,19 +289,54 @@ async function markLinkedOrderPaidFromWebhook({ gatewayOrderId, gatewayPaymentId
     updatePayload.status = "new";
   }
 
-  const { data, error } = await supabase
-    .from("orders")
-    .update(updatePayload)
-    .eq("id", order.id)
-    .eq("gateway_order_id", gatewayOrderId)
-    .select("id,status,payment_status,gateway_status,gateway_order_id,gateway_payment_id,payment_verified_at,paid_at")
+  const paidOrderUpdateQuery = applyOrderNotYetPaidFilter(
+    supabase
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", order.id)
+      .eq("gateway_order_id", gatewayOrderId)
+  );
+
+  const { data, error } = await paidOrderUpdateQuery
+    .select("id,hotel_slug,hotel_name,customer_name,customer_phone,customer_address,payment_method,payment_status,billing_status,note,items,totals,whatsapp_message,status,table_number,order_type,order_source,gateway_status,gateway_order_id,gateway_payment_id,payment_verified_at,paid_at")
     .maybeSingle();
 
   if (error) throw error;
 
+  if (data && shouldCreateOperationalNotification) {
+    void createNotificationEventSafely({
+      hotelSlug: data.hotel_slug || null,
+      sourceType: "order",
+      sourceId: data.id,
+      payload: {
+        orderId: data.id,
+        hotelName: data.hotel_name || "",
+        customerName: data.customer_name || "",
+        customerPhone: data.customer_phone || "",
+        customerAddress: data.customer_address || "",
+        paymentMethod: data.payment_method || "Online Payment",
+        paymentStatus: data.payment_status || "paid",
+        billingStatus: data.billing_status || null,
+        note: data.note || "",
+        items: Array.isArray(data.items) ? data.items : [],
+        totals:
+          data.totals && typeof data.totals === "object" && !Array.isArray(data.totals)
+            ? data.totals
+            : {},
+        whatsappMessage: data.whatsapp_message || "",
+        orderContext: {
+          orderType: data.order_type || "",
+          tableNumber: data.table_number || "",
+          orderSource: data.order_source || ""
+        },
+        status: data.status || "new"
+      }
+    });
+  }
+
   return {
     updated: !!data,
-    reason: data ? "updated" : "order_update_not_applied",
+    reason: data ? "updated" : "already_paid_by_other_request",
     order: data || null
   };
 }
@@ -338,11 +378,15 @@ async function markLinkedOrderFailedFromWebhook({
     updatePayload.status = "payment_failed";
   }
 
-  const { data, error } = await supabase
-    .from("orders")
-    .update(updatePayload)
-    .eq("id", order.id)
-    .eq("gateway_order_id", gatewayOrderId)
+  const failedOrderUpdateQuery = applyOrderNotYetPaidFilter(
+    supabase
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", order.id)
+      .eq("gateway_order_id", gatewayOrderId)
+  );
+
+  const { data, error } = await failedOrderUpdateQuery
     .select("id,status,payment_status,gateway_status,gateway_order_id,gateway_payment_id,payment_error")
     .maybeSingle();
 
@@ -350,7 +394,7 @@ async function markLinkedOrderFailedFromWebhook({
 
   return {
     updated: !!data,
-    reason: data ? "updated" : "order_update_not_applied",
+    reason: data ? "updated" : "already_paid_by_other_request",
     order: data || null
   };
 }
@@ -362,6 +406,10 @@ function getPaymentFailureReason(payment = {}) {
     normalizeOptionalText(payment.error_code, 500) ||
     "Payment failed"
   );
+}
+
+function applyOrderNotYetPaidFilter(query) {
+  return query.or("payment_status.is.null,payment_status.neq.paid");
 }
 
 function getSafePaymentMetadata(value) {

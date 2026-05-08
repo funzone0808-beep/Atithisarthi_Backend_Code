@@ -1,5 +1,8 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const { publicTestimonialSubmissionLimiter } = require("../middleware/public-rate-limiters");
+const { createNotificationEventSafely } = require("../utils/notifications");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 const { validateBody } = require("../validators/common");
 const { testimonialSubmissionSchema } = require("../validators/public");
 
@@ -21,9 +24,18 @@ function isMissingTestimonialsRelationError(error) {
   );
 }
 
-router.post("/", validateBody(testimonialSubmissionSchema), async (req, res) => {
+router.post("/", publicTestimonialSubmissionLimiter, validateBody(testimonialSubmissionSchema), async (req, res) => {
   try {
     const { hotelName, hotelSlug, name, role, text, stars } = req.validatedBody;
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for reviews",
+      forbiddenMessage: "This hotel cannot accept reviews from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
 
     const { data, error } = await supabase
       .from("testimonials")
@@ -55,6 +67,23 @@ router.post("/", validateBody(testimonialSubmissionSchema), async (req, res) => 
 
       throw error;
     }
+
+    void createNotificationEventSafely({
+      hotelSlug: data.hotel_slug || hotelSlug,
+      sourceType: "testimonial",
+      sourceId: data.id,
+      payload: {
+        testimonialId: data.id,
+        hotelName: hotelName || "",
+        hotelSlug: data.hotel_slug || hotelSlug || "",
+        name,
+        role: role || "",
+        text,
+        stars: Number(stars),
+        approvalStatus: data.is_approved ? "approved" : "pending_approval",
+        isApproved: !!data.is_approved
+      }
+    });
 
     res.status(201).json({
       success: true,

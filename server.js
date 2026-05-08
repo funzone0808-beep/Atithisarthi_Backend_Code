@@ -19,6 +19,7 @@ const testimonialsRoute = require("./routes/testimonials");
 const adminRoute = require("./routes/admin");
 const tenantRoute = require("./routes/tenant");
 const publicRoute = require("./routes/public");
+const publicAssistantRoute = require("./routes/public-assistant");
 const authRoute = require("./routes/auth");
 const staffRoute = require("./routes/staff");
 const uploadRoute = require("./routes/upload");
@@ -28,6 +29,7 @@ const paymentWebhooksRoute = require("./routes/payment-webhooks");
 const app = express();
 //const PORT = 5000;
 const PORT = env.port;
+app.set("trust proxy", 1);
 
 app.use(attachRequestContext);
 app.use(logRequestLifecycle);
@@ -152,21 +154,6 @@ const authLimiter = rateLimit({
   }
 });
 
-
-// (Optional: you imported rateLimit but not using yet)
-// Example usage:
- const limiter = rateLimit({
-   windowMs: 15 * 60 * 1000, // 15 minutes
-   max: 100, // limit each IP
- });
-
-//  const allowedOrigins = [
-//   "http://localhost:5500",
-//   "http://127.0.0.1:5500"
-// ];
-
- app.use(limiter);
-
 // Security & parsing middleware (added here)
 app.disable("x-powered-by");
 app.use(helmet());
@@ -177,14 +164,22 @@ app.use(
 );
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
-// app.set("trust proxy", 1); // enable in production behind trusted proxy
 
+const normalizeOrigin = (value = "") => String(value || "").trim().replace(/\/$/, "");
+const parseOriginList = (value = "") =>
+  String(value || "")
+    .split(",")
+    .map((entry) => normalizeOrigin(entry))
+    .filter(Boolean);
 
-const normalizeOrigin = (value = "") => value.replace(/\/$/, "");
-
-const allowedOrigins = [env.frontendUrl, env.adminUrl]
+const allowedOrigins = [
+  env.frontendUrl,
+  env.adminUrl,
+  ...parseOriginList(env.frontendOrigins)
+]
+  .map(normalizeOrigin)
   .filter(Boolean)
-  .map(normalizeOrigin);
+  .filter((origin, index, list) => list.indexOf(origin) === index);
 
 app.use(
   cors({
@@ -252,6 +247,7 @@ app.use("/api/testimonials", testimonialsRoute);
 app.use("/api/admin", adminRoute);
 app.use("/api/tenant", tenantRoute);
 app.use("/api/public", publicRoute);
+app.use("/api/public/assistant", publicAssistantRoute);
 app.use("/api/auth", authRoute);
 app.use("/api/staff/login", authLimiter);
 app.use("/api/staff", staffRoute);

@@ -18,11 +18,13 @@ const {
   toGatewayMinorAmount,
   verifyPaymentGatewaySignature
 } = require("../utils/payment-gateway");
+const { publicPaymentInitLimiter } = require("../middleware/public-rate-limiters");
 const {
   buildOrderTrackingReference,
   getOrderTrackingColumns,
   isMissingOrderTrackingColumnsError
 } = require("../utils/order-tracking");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
 
 const router = express.Router();
@@ -567,6 +569,10 @@ function omitTrackingColumns(columns = {}) {
   return remainingColumns;
 }
 
+function applyOrderNotYetPaidFilter(query) {
+  return query.or("payment_status.is.null,payment_status.neq.paid");
+}
+
 function getPaymentGatewayReadiness() {
   const config = getPaymentGatewayConfig();
   const safetyIssue = getPaymentGatewaySafetyIssue(config);
@@ -852,12 +858,16 @@ async function markLinkedOrderPaidFromVerifiedGateway({
     updatePayload.status = "new";
   }
 
-  const { data, error } = await supabase
-    .from("orders")
-    .update(updatePayload)
-    .eq("id", orderId)
-    .eq("hotel_slug", hotelSlug)
-    .eq("gateway_order_id", gatewayOrderId)
+  const paidOrderUpdateQuery = applyOrderNotYetPaidFilter(
+    supabase
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", orderId)
+      .eq("hotel_slug", hotelSlug)
+      .eq("gateway_order_id", gatewayOrderId)
+  );
+
+  const { data, error } = await paidOrderUpdateQuery
     .select("id,hotel_slug,hotel_name,customer_name,customer_phone,customer_address,payment_method,payment_status,billing_status,note,items,totals,whatsapp_message,status,table_number,order_type,order_source,gateway_status,gateway_order_id,gateway_payment_id,payment_verified_at,paid_at")
     .maybeSingle();
 
@@ -905,7 +915,7 @@ async function markLinkedOrderPaidFromVerifiedGateway({
 
   return {
     updated: !!data,
-    reason: data ? "updated" : "order_update_not_applied",
+    reason: data ? "updated" : "already_paid_by_other_request",
     order: data || null
   };
 }
@@ -976,13 +986,14 @@ async function markLinkedOrderPaymentFailed({
     };
   }
 
+  const normalizedGatewayPaymentId = normalizeOptionalText(gatewayPaymentId, 200);
+  const hasConfirmedGatewayPaymentFailure = !!normalizedGatewayPaymentId;
+
   const updatePayload = {
-    gateway_status: "failed",
-    payment_status: "unpaid",
     payment_error: normalizeOptionalText(reason, 500) || "Payment failed or was cancelled",
     payment_metadata: buildPaymentFailureMetadata({
       existingMetadata: existingOrder.payment_metadata,
-      gatewayPaymentId,
+      gatewayPaymentId: normalizedGatewayPaymentId,
       reason,
       errorCode,
       errorSource,
@@ -990,20 +1001,26 @@ async function markLinkedOrderPaymentFailed({
     })
   };
 
-  if (gatewayPaymentId) {
-    updatePayload.gateway_payment_id = gatewayPaymentId;
+  if (hasConfirmedGatewayPaymentFailure) {
+    updatePayload.gateway_status = "failed";
+    updatePayload.payment_status = "unpaid";
+    updatePayload.gateway_payment_id = normalizedGatewayPaymentId;
   }
 
-  if (existingOrder.status === "payment_pending") {
+  if (hasConfirmedGatewayPaymentFailure && existingOrder.status === "payment_pending") {
     updatePayload.status = "payment_failed";
   }
 
-  const { data, error } = await supabase
-    .from("orders")
-    .update(updatePayload)
-    .eq("id", orderId)
-    .eq("hotel_slug", hotelSlug)
-    .eq("gateway_order_id", gatewayOrderId)
+  const failedOrderUpdateQuery = applyOrderNotYetPaidFilter(
+    supabase
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", orderId)
+      .eq("hotel_slug", hotelSlug)
+      .eq("gateway_order_id", gatewayOrderId)
+  );
+
+  const { data, error } = await failedOrderUpdateQuery
     .select("id,hotel_slug,status,payment_status,gateway_status,gateway_order_id,gateway_payment_id,payment_error,payment_metadata")
     .maybeSingle();
 
@@ -1020,7 +1037,13 @@ async function markLinkedOrderPaymentFailed({
 
   return {
     updated: !!data,
-    reason: data ? "updated" : "order_update_not_applied",
+    reason: data
+      ? (
+          hasConfirmedGatewayPaymentFailure
+            ? "updated"
+            : "failure_recorded_without_gateway_payment"
+        )
+      : "already_paid_by_other_request",
     order: data || null
   };
 }
@@ -1032,7 +1055,7 @@ router.get("/readiness", (req, res) => {
   });
 });
 
-router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
+router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), async (req, res) => {
   let paymentLogMeta = getPaymentLogMeta({
     requestId: req.requestId || ""
   });
@@ -1056,6 +1079,15 @@ router.post("/init", validateBody(paymentInitSchema), async (req, res) => {
       orderContext,
       orderDraft
     } = req.validatedBody;
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for online payment",
+      forbiddenMessage: "This hotel cannot accept payment requests from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
 
     const resolvedOrderContext = resolveVerifiedQrOrderContext({
       hotelSlug,
@@ -1211,6 +1243,18 @@ router.post("/verify", validateBody(paymentVerifySchema), async (req, res) => {
       gatewayPaymentId,
       provider: getPaymentGatewayConfig().provider
     });
+
+    if (hotelSlug) {
+      const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+        notFoundMessage: "Hotel is not available for payment verification",
+        forbiddenMessage: "This hotel cannot verify payments from the current origin"
+      });
+
+      if (!hotelAccess) {
+        return;
+      }
+    }
+
     const isVerified = verifyPaymentGatewaySignature({
       gatewayOrderId,
       gatewayPaymentId,
@@ -1290,6 +1334,16 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
       gatewayOrderId,
       provider: getPaymentGatewayConfig().provider
     });
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for payment reconciliation",
+      forbiddenMessage: "This hotel cannot reconcile payments from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const paymentStatus = await fetchPaymentGatewayOrderPayments(gatewayOrderId);
     const capturedPayment = findCapturedGatewayPayment(paymentStatus.payments);
 
@@ -1405,6 +1459,16 @@ router.post("/fail", validateBody(paymentFailureSchema), async (req, res) => {
       gatewayPaymentId,
       provider: getPaymentGatewayConfig().provider
     });
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for payment failure updates",
+      forbiddenMessage: "This hotel cannot update payment failures from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const orderUpdate = await markLinkedOrderPaymentFailed({
       hotelSlug,
       orderId,

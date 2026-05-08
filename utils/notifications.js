@@ -5,7 +5,10 @@ const nodemailer = require("nodemailer");
 const NOTIFICATION_SOURCE_EVENT_TYPES = {
   order: "order_created",
   reservation: "reservation_created",
-  inquiry: "inquiry_created"
+  inquiry: "inquiry_created",
+  contact_submission: "contact_submission_created",
+  testimonial: "testimonial_submitted",
+  support_request: "support_request_created"
 };
 const NOTIFICATION_SOURCE_SETTING_KEYS = {
   order: "notifyOnNewOrder",
@@ -173,7 +176,7 @@ function isNotificationEnabledForSourceType(sourceType, hotelSettings) {
   const settingsKey = NOTIFICATION_SOURCE_SETTING_KEYS[normalizedSourceType];
 
   if (!settingsKey) {
-    return false;
+    return true;
   }
 
   return !!hotelSettings?.[settingsKey];
@@ -234,6 +237,18 @@ function buildNotificationEmailSubject(notificationEvent = {}) {
 
   if (sourceType === "inquiry") {
     return `New inquiry received (${hotelSlug})${sourceId ? ` #${sourceId}` : ""}`;
+  }
+
+  if (sourceType === "contact_submission") {
+    return `New contact message received (${hotelSlug})${sourceId ? ` #${sourceId}` : ""}`;
+  }
+
+  if (sourceType === "testimonial") {
+    return `New testimonial submitted (${hotelSlug})${sourceId ? ` #${sourceId}` : ""}`;
+  }
+
+  if (sourceType === "support_request") {
+    return `New support request received (${hotelSlug})${sourceId ? ` #${sourceId}` : ""}`;
   }
 
   return `New notification event (${hotelSlug})${sourceId ? ` #${sourceId}` : ""}`;
@@ -452,7 +467,10 @@ function buildNotificationEmailHtml(notificationEvent = {}) {
   const eventTitleMap = {
     order: "New order received",
     reservation: "New reservation received",
-    inquiry: "New inquiry received"
+    inquiry: "New inquiry received",
+    contact_submission: "New contact message received",
+    testimonial: "New testimonial submitted",
+    support_request: "New support request received"
   };
   const eventTitle = eventTitleMap[sourceType] || "New notification received";
   let primaryBadge = buildNotificationBadge(String(sourceType || "event"), "default");
@@ -526,6 +544,36 @@ function buildNotificationEmailHtml(notificationEvent = {}) {
       { label: "Status", value: payload.status || "" }
     ];
     primaryBadge = buildNotificationBadge("inquiry", "info");
+  } else if (sourceType === "contact_submission") {
+    overviewRows = [
+      { label: "Contact ID", value: payload.contactSubmissionId || notificationEvent.source_id || "" },
+      { label: "Name", value: payload.name || "" },
+      { label: "Email", value: payload.email || "" },
+      { label: "Subject", value: payload.subject || "" },
+      { label: "Status", value: payload.status || "new" },
+      { label: "Source", value: payload.source || "" }
+    ];
+    primaryBadge = buildNotificationBadge("contact", "info");
+  } else if (sourceType === "testimonial") {
+    overviewRows = [
+      { label: "Review ID", value: payload.testimonialId || notificationEvent.source_id || "" },
+      { label: "Guest", value: payload.name || "" },
+      { label: "Role", value: payload.role || "" },
+      { label: "Stars", value: payload.stars || "" },
+      { label: "Approval", value: payload.approvalStatus || "pending" }
+    ];
+    primaryBadge = buildNotificationBadge("testimonial", "info");
+  } else if (sourceType === "support_request") {
+    overviewRows = [
+      { label: "Support ID", value: payload.supportRequestId || notificationEvent.source_id || "" },
+      { label: "Order ID", value: payload.orderId || "" },
+      { label: "Hotel", value: payload.hotelName || "" },
+      { label: "Table", value: payload.tableNumber || "" },
+      { label: "Request Type", value: payload.requestType || "" },
+      { label: "Order Status", value: payload.orderStatus || "" },
+      { label: "Source", value: payload.source || "" }
+    ];
+    primaryBadge = buildNotificationBadge("support", "info");
   } else {
     detailsSection = buildNotificationInfoRows([
       { label: "Hotel", value: notificationEvent.hotel_slug || "" },

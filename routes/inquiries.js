@@ -1,6 +1,8 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const { publicInquiryLimiter } = require("../middleware/public-rate-limiters");
 const { createNotificationEventSafely } = require("../utils/notifications");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 
 // ✅ Added imports
 const { validateBody } = require("../validators/common");
@@ -9,7 +11,7 @@ const { inquirySchema } = require("../validators/public");
 const router = express.Router();
 
 // ✅ Middleware added
-router.post("/", validateBody(inquirySchema), async (req, res) => {
+router.post("/", publicInquiryLimiter, validateBody(inquirySchema), async (req, res) => {
   try {
     // ✅ Use validatedBody
     const {
@@ -22,6 +24,15 @@ router.post("/", validateBody(inquirySchema), async (req, res) => {
       guests,
       specialRequirements
     } = req.validatedBody;
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for inquiries",
+      forbiddenMessage: "This hotel cannot accept inquiries from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
 
     // (Optional: manual validation can be removed since schema handles it)
 

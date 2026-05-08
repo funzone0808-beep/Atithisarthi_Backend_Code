@@ -6,6 +6,8 @@ const {
   buildOrderTrackingReference,
   getOrderTrackingColumns
 } = require("../utils/order-tracking");
+const { publicOrderLimiter } = require("../middleware/public-rate-limiters");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
 
 // ✅ Added imports
@@ -469,7 +471,7 @@ async function insertOrderRow(baseOrderRow, optionalOrderColumns = {}, logMeta =
 }
 
 // ✅ Middleware added here
-router.post("/", validateBody(orderSchema), async (req, res) => {
+router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res) => {
   let requestHotelSlug = "";
   let requestOrderContext = null;
   let requestItemCount = 0;
@@ -493,6 +495,15 @@ router.post("/", validateBody(orderSchema), async (req, res) => {
 
     requestHotelSlug = hotelSlug;
     requestItemCount = Array.isArray(items) ? items.length : 0;
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for new orders",
+      forbiddenMessage: "This hotel cannot accept orders from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
 
     const resolvedOrderContext = resolveVerifiedQrOrderContext({
       hotelSlug,

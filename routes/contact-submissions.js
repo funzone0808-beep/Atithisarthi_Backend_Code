@@ -1,5 +1,8 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const { publicContactSubmissionLimiter } = require("../middleware/public-rate-limiters");
+const { createNotificationEventSafely } = require("../utils/notifications");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 const { validateBody } = require("../validators/common");
 const { contactSubmissionSchema } = require("../validators/public");
 
@@ -21,7 +24,7 @@ function isMissingContactSubmissionsRelationError(error) {
   );
 }
 
-router.post("/", validateBody(contactSubmissionSchema), async (req, res) => {
+router.post("/", publicContactSubmissionLimiter, validateBody(contactSubmissionSchema), async (req, res) => {
   try {
     const {
       hotelName,
@@ -33,6 +36,15 @@ router.post("/", validateBody(contactSubmissionSchema), async (req, res) => {
       googleSheetStatus,
       googleSheetResponse
     } = req.validatedBody;
+
+    const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
+      notFoundMessage: "Hotel is not available for contact requests",
+      forbiddenMessage: "This hotel cannot accept contact requests from the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
 
     const { data, error } = await supabase
       .from("contact_submissions")
@@ -69,6 +81,24 @@ router.post("/", validateBody(contactSubmissionSchema), async (req, res) => {
 
       throw error;
     }
+
+    void createNotificationEventSafely({
+      hotelSlug: data.hotel_slug || hotelSlug,
+      sourceType: "contact_submission",
+      sourceId: data.id,
+      payload: {
+        contactSubmissionId: data.id,
+        hotelName: data.hotel_name || hotelName || "",
+        hotelSlug: data.hotel_slug || hotelSlug || "",
+        name: data.name || name,
+        email: data.email || email,
+        subject: data.subject || subject || "",
+        message: data.message || message,
+        status: data.status || "new",
+        source: data.source || "website_contact",
+        googleSheetStatus: data.google_sheet_status || googleSheetStatus || "not_attempted"
+      }
+    });
 
     res.status(201).json({
       success: true,

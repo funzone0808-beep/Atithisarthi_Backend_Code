@@ -1,5 +1,6 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
 
 const router = express.Router();
 const PUBLIC_ROUTE_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=120";
@@ -105,6 +106,12 @@ function setCachedPublicRoutePayload(cacheKey, payload) {
 router.get("/hotel/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const hotelAccess = await ensurePublicHotelAccess(req, res, slug);
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const cacheKey = `hotel:${slug}`;
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 
@@ -148,6 +155,12 @@ router.get("/hotel/:slug", async (req, res) => {
 router.get("/menu/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const hotelAccess = await ensurePublicHotelAccess(req, res, slug);
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const cacheKey = `menu:${slug}`;
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 
@@ -208,6 +221,12 @@ router.get("/menu/:slug", async (req, res) => {
 router.get("/gallery/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const hotelAccess = await ensurePublicHotelAccess(req, res, slug);
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const cacheKey = `gallery:${slug}`;
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 
@@ -254,6 +273,12 @@ router.get("/gallery/:slug", async (req, res) => {
 router.get("/testimonials/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
+    const hotelAccess = await ensurePublicHotelAccess(req, res, slug);
+
+    if (!hotelAccess) {
+      return;
+    }
+
     const cacheKey = `testimonials:${slug}`;
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 

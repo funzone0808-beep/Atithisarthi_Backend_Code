@@ -1,5 +1,10 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const {
+  extractConfiguredSubdomainLabel,
+  isTrustedConfiguredSubdomainHost,
+  normalizePublicHostname
+} = require("../utils/public-hotel-access");
 
 const router = express.Router();
 const TENANT_RESOLVE_CACHE_CONTROL = "public, max-age=120, stale-while-revalidate=600";
@@ -53,7 +58,7 @@ router.get("/resolve", async (req, res) => {
       });
     }
 
-    const normalizedHost = host.replace(/^www\./, "");
+    const normalizedHost = normalizePublicHostname(host);
     const cacheKey = `resolve:${normalizedHost}`;
     const cachedPayload = getCachedTenantResolvePayload(cacheKey);
 
@@ -74,17 +79,22 @@ router.get("/resolve", async (req, res) => {
 
     // If not found, try subdomain match against first hostname label
     if (!data) {
-      const subdomainPart = normalizedHost.split(".")[0];
+      const subdomainPart =
+        isTrustedConfiguredSubdomainHost(normalizedHost)
+          ? extractConfiguredSubdomainLabel(normalizedHost)
+          : "";
 
-      const subdomainResult = await supabase
-        .from("hotels")
-        .select(PUBLIC_TENANT_FIELDS)
-        .eq("subdomain", subdomainPart)
-        .eq("is_active", true)
-        .maybeSingle();
+      if (subdomainPart) {
+        const subdomainResult = await supabase
+          .from("hotels")
+          .select(PUBLIC_TENANT_FIELDS)
+          .eq("subdomain", subdomainPart)
+          .eq("is_active", true)
+          .maybeSingle();
 
-      if (subdomainResult.error) throw subdomainResult.error;
-      data = subdomainResult.data;
+        if (subdomainResult.error) throw subdomainResult.error;
+        data = subdomainResult.data;
+      }
     }
 
     if (!data) {

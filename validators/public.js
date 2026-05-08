@@ -78,10 +78,29 @@ const contactSubmissionSchema = z.object({
   googleSheetResponse: z.record(z.string(), z.any()).optional().nullable()
 });
 
+const menuAssistantRequestSchema = z.object({
+  message: z.string().trim().min(2).max(500),
+  context: z
+    .object({
+      budget: z.number().nonnegative().max(100000).nullish(),
+      peopleCount: z.number().int().min(1).max(20).nullish(),
+      pageScope: z.string().trim().max(40).optional(),
+      orderType: z.string().trim().max(40).optional(),
+      tableNumber: z.string().trim().max(80).optional(),
+      orderSource: z.string().trim().max(40).optional(),
+      addMode: z.boolean().optional(),
+      trackingHotelSlug: z.string().trim().max(120).optional(),
+      trackingOrderId: z.string().trim().max(120).optional(),
+      trackingToken: z.string().trim().max(200).optional()
+    })
+    .optional()
+});
+
 module.exports = {
   orderSchema,
   inquirySchema,
   reservationSchema,
   testimonialSubmissionSchema,
-  contactSubmissionSchema
+  contactSubmissionSchema,
+  menuAssistantRequestSchema
 };

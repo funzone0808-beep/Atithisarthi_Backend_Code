@@ -64,6 +64,17 @@ const hotelThemeSchema = z
       })
       .passthrough()
       .optional(),
+    aiAssistant: z
+      .object({
+        enabled: z.boolean().optional(),
+        title: z.string().trim().max(160).optional(),
+        intro: z.string().trim().max(320).optional(),
+        tone: z.enum(["default", "friendly", "formal"]).optional(),
+        examplePrompt: z.string().trim().max(160).optional(),
+        starterPrompts: z.array(z.string().trim().min(1).max(120)).max(6).optional()
+      })
+      .passthrough()
+      .optional(),
     content: z
       .object({
         navLabels: z
