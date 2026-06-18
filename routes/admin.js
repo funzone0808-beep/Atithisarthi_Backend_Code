@@ -4,6 +4,11 @@ const { requireAdminAuth } = require("../middleware/require-admin-auth");
 const {
   processNotificationEventDeliverySafely
 } = require("../utils/notifications");
+const {
+  getOrderCreatedByStaffMap,
+  getOrderCreatedByStaffResponse,
+  normalizeOrderCreatedByStaffId
+} = require("../utils/order-staff-attribution");
 const router = express.Router();
 const { validateBody } = require("../validators/common");
 const {
@@ -86,6 +91,16 @@ function normalizeStatusValue(value) {
 function getAllowedStatus(value, allowedStatuses = []) {
   const normalizedStatus = normalizeStatusValue(value);
   return allowedStatuses.includes(normalizedStatus) ? normalizedStatus : "";
+}
+
+function buildAdminOrderResponse(order = {}, staffById = new Map()) {
+  const createdByStaffId = normalizeOrderCreatedByStaffId(order.created_by_staff_id);
+
+  return {
+    ...order,
+    createdByStaffId: createdByStaffId ? String(createdByStaffId) : "",
+    createdByStaff: getOrderCreatedByStaffResponse(order, staffById)
+  };
 }
 
 function normalizeBillNumberPart(value, fallback = "ORDER", maxLength = 18) {
@@ -289,10 +304,13 @@ router.get("/orders", async (req, res) => {
 
     if (error) throw error;
 
+    const safeOrders = data || [];
+    const staffById = await getOrderCreatedByStaffMap(supabase, safeOrders);
+
     res.json({
       success: true,
-      count: data.length,
-      orders: data
+      count: safeOrders.length,
+      orders: safeOrders.map((order) => buildAdminOrderResponse(order, staffById))
     });
   } catch (error) {
     console.error("Admin orders fetch error:", error);

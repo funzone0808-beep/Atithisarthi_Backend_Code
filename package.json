@@ -25,12 +25,13 @@
     "verify:staff-access": "node scripts/verify-staff-access-schema.js",
     "verify:staff-billing": "node scripts/verify-staff-billing-flow.js",
     "verify:staff-billing-permissions": "node scripts/verify-staff-billing-permissions.js",
+    "verify:staff-table-ordering": "node scripts/verify-staff-table-ordering.js",
     "verify:tenant-domain-trust": "node scripts/verify-tenant-domain-trust.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
     "bcryptjs": "^3.0.3",
-    "cors": "^2.8.5",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.0",
     "express": "^4.19.2",
     "express-rate-limit": "^8.3.2",

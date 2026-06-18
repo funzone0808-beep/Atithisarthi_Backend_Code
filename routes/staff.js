@@ -1,10 +1,22 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const { supabase } = require("../utils/supabase");
+const { createNotificationEventSafely } = require("../utils/notifications");
+const {
+  buildOrderTrackingReference,
+  getOrderTrackingColumns,
+  isMissingOrderTrackingColumnsError
+} = require("../utils/order-tracking");
+const {
+  getOrderCreatedByStaffMap,
+  getOrderCreatedByStaffResponse,
+  isMissingOrderStaffAttributionColumnsError,
+  normalizeOrderCreatedByStaffId
+} = require("../utils/order-staff-attribution");
 const { signStaffToken, normalizeStaffRole, isStaffManagerRole } = require("../utils/auth");
 const { requireStaffAuth, requireStaffManagerAccess } = require("../middleware/require-staff-auth");
 const { validateBody } = require("../validators/common");
-const { staffLoginSchema } = require("../validators/staff");
+const { staffLoginSchema, staffTableOrderSchema } = require("../validators/staff");
 
 const router = express.Router();
 const STAFF_ORDER_RANGES = ["today", "week", "month", "recent", "all"];
@@ -17,12 +29,29 @@ const STAFF_RESERVATION_STATUSES = ["new", "confirmed", "seated", "completed", "
 const STAFF_INQUIRY_STATUSES = ["new", "contacted", "converted", "closed"];
 const STAFF_CONTACT_SUBMISSION_STATUSES = ["new", "contacted", "resolved", "closed", "archived"];
 const STAFF_SUPPORT_REQUEST_STATUSES = ["new", "acknowledged", "resolved", "closed"];
+const STAFF_MENU_FIELDS = [
+  "item_id",
+  "name",
+  "description",
+  "price",
+  "image",
+  "alt",
+  "badge",
+  "tag",
+  "category",
+  "sort_order"
+].join(",");
 const ORDER_BILLING_COLUMNS = [
   "payment_status",
   "billing_status",
   "bill_number",
   "billed_at",
   "paid_at"
+];
+const ORDER_TABLE_CONTEXT_COLUMNS = [
+  "order_type",
+  "table_number",
+  "order_source"
 ];
 const ORDER_ADDON_METADATA_COLUMNS = [
   "parent_order_id",
@@ -31,6 +60,11 @@ const ORDER_ADDON_METADATA_COLUMNS = [
   "order_sequence_label",
   "addon_sequence"
 ];
+
+function getStaffOrderCreatorColumns(staffUser = {}) {
+  const createdByStaffId = normalizeOrderCreatedByStaffId(staffUser?.sub || staffUser?.id);
+  return createdByStaffId ? { created_by_staff_id: createdByStaffId } : {};
+}
 
 function isMissingStaffAccessRelationError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
@@ -100,6 +134,12 @@ function normalizeStatusValue(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function normalizeStaffText(value = "", maxLength = 120) {
+  return typeof value === "string"
+    ? value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, maxLength)
+    : "";
+}
+
 function getAllowedStaffStatus(value, allowedStatuses = []) {
   const normalizedStatus = normalizeStatusValue(value);
   return allowedStatuses.includes(normalizedStatus) ? normalizedStatus : "";
@@ -149,6 +189,21 @@ function isMissingOrderBillingColumnsError(error) {
     (
       details.includes("could not find") &&
       ORDER_BILLING_COLUMNS.some((columnName) => details.includes(columnName))
+    )
+  );
+}
+
+function isMissingOrderTableContextColumnsError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "PGRST204" ||
+    (
+      details.includes("could not find") &&
+      ORDER_TABLE_CONTEXT_COLUMNS.some((columnName) => details.includes(columnName))
     )
   );
 }
@@ -294,6 +349,183 @@ function buildStaffSessionResponse(staffUser = {}) {
     role,
     isManager: isStaffManagerRole(role)
   };
+}
+
+async function getStaffOrderHotelContext(hotelSlug) {
+  const normalizedHotelSlug = normalizeStaffText(hotelSlug, 120);
+
+  if (!normalizedHotelSlug) {
+    return {
+      error: "Staff hotel scope is missing"
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("hotel_profiles")
+    .select("hotel_slug,hotel_name,gst_percent")
+    .eq("hotel_slug", normalizedHotelSlug)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  if (!data) {
+    return {
+      error: "Hotel profile not found"
+    };
+  }
+
+  return { hotel: data };
+}
+
+async function getStaffAvailableMenuItemsById(hotelSlug, itemIds = []) {
+  const { data, error } = await supabase
+    .from("menu_items")
+    .select("item_id,name,price")
+    .eq("hotel_slug", hotelSlug)
+    .eq("is_available", true)
+    .eq("is_archived", false)
+    .in("item_id", itemIds);
+
+  if (error) throw error;
+
+  return new Map((data || []).map((item) => [String(item.item_id), item]));
+}
+
+async function calculateStaffTableOrderPricing({ hotelSlug, items }) {
+  const hotelContext = await getStaffOrderHotelContext(hotelSlug);
+
+  if (hotelContext.error) {
+    return hotelContext;
+  }
+
+  const hotel = hotelContext.hotel;
+  const uniqueItemIds = [...new Set((items || []).map((item) => String(item.id || "")))].filter(Boolean);
+  const menuItemsById = await getStaffAvailableMenuItemsById(hotel.hotel_slug, uniqueItemIds);
+  const missingItems = uniqueItemIds.filter((itemId) => !menuItemsById.has(itemId));
+
+  if (missingItems.length) {
+    return {
+      error: `Some menu items are unavailable: ${missingItems.join(", ")}`
+    };
+  }
+
+  const verifiedItems = (items || []).map((item) => {
+    const itemId = String(item.id || "");
+    const menuItem = menuItemsById.get(itemId);
+    const qty = Number(item.qty || 0);
+    const price = Number(menuItem.price || 0);
+
+    return {
+      id: itemId,
+      name: menuItem.name || itemId,
+      qty,
+      price,
+      lineTotal: price * qty
+    };
+  });
+  const subtotal = verifiedItems.reduce((sum, item) => sum + item.lineTotal, 0);
+  const gstPercent = Number(hotel.gst_percent || 5);
+  const gst = Math.round((subtotal * gstPercent) / 100);
+  const normalTotal = subtotal + gst;
+
+  return {
+    hotel,
+    items: verifiedItems,
+    totals: {
+      subtotal,
+      gst,
+      deliveryCharge: 0,
+      gstPercent,
+      normalTotal,
+      total: normalTotal
+    }
+  };
+}
+
+function formatStaffOrderMoney(amount = 0) {
+  return `Rs. ${Number(amount || 0).toFixed(2)}`;
+}
+
+function buildStaffTableOrderSummary({
+  hotelName,
+  tableNumber,
+  staffUser,
+  customerName,
+  customerPhone,
+  note,
+  items,
+  totals
+}) {
+  const lines = [
+    `Staff Table Order - ${hotelName || "Hotel"}`,
+    "----------------------",
+    "Order Type: Dine-in",
+    `Table: ${tableNumber}`,
+    "Source: Staff",
+    `Taken By: ${staffUser?.displayName || staffUser?.display_name || "Staff"}`
+  ];
+
+  if (customerName) {
+    lines.push(`Guest: ${customerName}`);
+  }
+
+  if (customerPhone) {
+    lines.push(`Phone: ${customerPhone}`);
+  }
+
+  lines.push("");
+  (items || []).forEach((item) => {
+    lines.push(`${item.name} x${item.qty} = ${formatStaffOrderMoney(item.price * item.qty)}`);
+  });
+  lines.push("");
+  lines.push(`Subtotal = ${formatStaffOrderMoney(totals.subtotal)}`);
+  lines.push(`GST = ${formatStaffOrderMoney(totals.gst)}`);
+  lines.push(`Total = ${formatStaffOrderMoney(totals.normalTotal)}`);
+  lines.push("Payment Status = Unpaid");
+  lines.push("Billing Status = Not billed");
+
+  if (note) {
+    lines.push("");
+    lines.push(`Note = ${note}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function insertStaffTableOrderRow(baseOrderRow, optionalOrderColumns) {
+  let currentOptionalOrderColumns = { ...optionalOrderColumns };
+  let insertAttempt = await supabase
+    .from("orders")
+    .insert([{ ...baseOrderRow, ...currentOptionalOrderColumns }])
+    .select()
+    .single();
+
+  if (insertAttempt.error && isMissingOrderTrackingColumnsError(insertAttempt.error)) {
+    const { tracking_token, tracking_token_created_at, ...columnsWithoutTracking } =
+      currentOptionalOrderColumns;
+    currentOptionalOrderColumns = columnsWithoutTracking;
+    insertAttempt = await supabase
+      .from("orders")
+      .insert([{ ...baseOrderRow, ...currentOptionalOrderColumns }])
+      .select()
+      .single();
+  }
+
+  if (
+    insertAttempt.error &&
+    isMissingOrderStaffAttributionColumnsError(insertAttempt.error)
+  ) {
+    const { created_by_staff_id, ...columnsWithoutStaffAttribution } =
+      currentOptionalOrderColumns;
+    currentOptionalOrderColumns = columnsWithoutStaffAttribution;
+    insertAttempt = await supabase
+      .from("orders")
+      .insert([{ ...baseOrderRow, ...currentOptionalOrderColumns }])
+      .select()
+      .single();
+  }
+
+  return insertAttempt;
 }
 
 function getStaffOrdersRange(value = "") {
@@ -700,7 +932,9 @@ function buildStaffItemSalesReports(orders = [], starts = getStaffOperationalRep
   };
 }
 
-function buildStaffOrderResponse(order = {}) {
+function buildStaffOrderResponse(order = {}, staffById = new Map()) {
+  const createdByStaffId = normalizeOrderCreatedByStaffId(order.created_by_staff_id);
+
   return {
     id: order.id,
     hotelSlug: order.hotel_slug || "",
@@ -730,8 +964,38 @@ function buildStaffOrderResponse(order = {}) {
         ? order.totals
         : {},
     routeTransfer: buildStaffRouteTransferResponse(order),
-    createdAt: order.created_at || ""
+    createdAt: order.created_at || "",
+    createdByStaffId: createdByStaffId ? String(createdByStaffId) : "",
+    createdByStaff: getOrderCreatedByStaffResponse(order, staffById)
   };
+}
+
+function buildStaffMenuItemResponse(item = {}) {
+  return {
+    id: item.item_id || "",
+    name: item.name || "",
+    desc: item.description || "",
+    price: Number(item.price || 0),
+    image: item.image || "",
+    alt: item.alt || item.name || "",
+    badge: item.badge || "",
+    tag: item.tag || "",
+    category: item.category || "others",
+    sortOrder: Number(item.sort_order || 0)
+  };
+}
+
+function groupStaffMenuItemsByCategory(items = []) {
+  return items.reduce((groupedMenu, item) => {
+    const category = item.category || "others";
+
+    if (!groupedMenu[category]) {
+      groupedMenu[category] = [];
+    }
+
+    groupedMenu[category].push(item);
+    return groupedMenu;
+  }, {});
 }
 
 function buildStaffReservationResponse(reservation = {}) {
@@ -948,6 +1212,46 @@ router.post("/login", validateBody(staffLoginSchema), async (req, res) => {
   }
 });
 
+router.get("/menu", requireStaffAuth, async (req, res) => {
+  try {
+    const hotelSlug = String(req.staffHotelSlug || "").trim();
+
+    if (!hotelSlug) {
+      return res.status(403).json({
+        success: false,
+        message: "Staff hotel scope is missing"
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("menu_items")
+      .select(STAFF_MENU_FIELDS)
+      .eq("hotel_slug", hotelSlug)
+      .eq("is_available", true)
+      .eq("is_archived", false)
+      .order("category", { ascending: true })
+      .order("sort_order", { ascending: true });
+
+    if (error) throw error;
+
+    const items = (data || []).map(buildStaffMenuItemResponse);
+
+    res.json({
+      success: true,
+      hotelSlug,
+      count: items.length,
+      items,
+      menu: groupStaffMenuItemsByCategory(items)
+    });
+  } catch (error) {
+    console.error("Staff menu fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch staff menu"
+    });
+  }
+});
+
 router.get("/orders", requireStaffAuth, async (req, res) => {
   try {
     const hotelSlug = String(req.staffHotelSlug || "").trim();
@@ -977,7 +1281,9 @@ router.get("/orders", requireStaffAuth, async (req, res) => {
 
     if (error) throw error;
 
-    const orders = (data || []).map(buildStaffOrderResponse);
+    const safeOrders = data || [];
+    const staffById = await getOrderCreatedByStaffMap(supabase, safeOrders);
+    const orders = safeOrders.map((order) => buildStaffOrderResponse(order, staffById));
 
     res.json({
       success: true,
@@ -991,6 +1297,149 @@ router.get("/orders", requireStaffAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch staff orders"
+    });
+  }
+});
+
+router.post("/orders", requireStaffAuth, validateBody(staffTableOrderSchema), async (req, res) => {
+  try {
+    const hotelSlug = String(req.staffHotelSlug || "").trim();
+
+    if (!hotelSlug) {
+      return res.status(403).json({
+        success: false,
+        message: "Staff hotel scope is missing"
+      });
+    }
+
+    const tableNumber = normalizeStaffText(req.validatedBody.tableNumber, 80);
+    const customerName = normalizeStaffText(req.validatedBody.customerName, 100) || "Table Guest";
+    const customerPhone = normalizeStaffText(req.validatedBody.customerPhone, 20);
+    const note = normalizeStaffText(req.validatedBody.note, 1000);
+    const items = req.validatedBody.items || [];
+    const pricing = await calculateStaffTableOrderPricing({ hotelSlug, items });
+
+    if (pricing.error) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        details: [
+          {
+            path: ["items"],
+            message: pricing.error
+          }
+        ]
+      });
+    }
+
+    const hotelName = pricing.hotel.hotel_name || "Unknown Hotel";
+    const orderSummary = buildStaffTableOrderSummary({
+      hotelName,
+      tableNumber,
+      staffUser: req.staffUser,
+      customerName,
+      customerPhone,
+      note,
+      items: pricing.items,
+      totals: pricing.totals
+    });
+    const baseOrderRow = {
+      hotel_name: hotelName,
+      hotel_slug: pricing.hotel.hotel_slug || hotelSlug,
+      customer_name: customerName,
+      customer_phone: customerPhone,
+      customer_address: `Dine-in table ${tableNumber}`,
+      payment_method: "COD",
+      note,
+      items: pricing.items,
+      totals: pricing.totals,
+      whatsapp_message: orderSummary,
+      status: "new"
+    };
+    const optionalOrderColumns = {
+      order_type: "dine-in",
+      table_number: tableNumber,
+      order_source: "staff",
+      payment_status: "unpaid",
+      billing_status: "not_billed",
+      ...getStaffOrderCreatorColumns(req.staffUser),
+      ...getOrderTrackingColumns()
+    };
+    const { data, error } = await insertStaffTableOrderRow(
+      baseOrderRow,
+      optionalOrderColumns
+    );
+
+    if (error) {
+      if (isMissingOrderTableContextColumnsError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Order table context fields are not initialized yet"
+        });
+      }
+
+      if (isMissingOrderBillingColumnsError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Order billing fields are not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    void createNotificationEventSafely({
+      hotelSlug: data.hotel_slug || hotelSlug,
+      sourceType: "order",
+      sourceId: data.id,
+      payload: {
+        orderId: data.id,
+        hotelName: data.hotel_name || hotelName,
+        customerName: data.customer_name || customerName,
+        customerPhone: data.customer_phone || customerPhone,
+        customerAddress: data.customer_address || `Dine-in table ${tableNumber}`,
+        paymentMethod: data.payment_method || "COD",
+        paymentStatus: data.payment_status || "unpaid",
+        billingStatus: data.billing_status || "not_billed",
+        note: data.note || note,
+        items: Array.isArray(data.items) ? data.items : pricing.items,
+        totals:
+          data.totals && typeof data.totals === "object" && !Array.isArray(data.totals)
+            ? data.totals
+            : pricing.totals,
+        whatsappMessage: data.whatsapp_message || orderSummary,
+        orderContext: {
+          orderType: data.order_type || "dine-in",
+          tableNumber: data.table_number || tableNumber,
+          orderSource: data.order_source || "staff"
+        },
+        status: data.status || "new",
+        createdByStaff: {
+          id: req.staffUser?.sub || req.staffUser?.id || "",
+          displayName: req.staffUser?.displayName || "Staff",
+          role: req.staffUser?.role || "staff"
+        }
+      }
+    });
+
+    const tracking = buildOrderTrackingReference(data);
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, [data]);
+
+    res.status(201).json({
+      success: true,
+      message: "Staff table order saved",
+      order: buildStaffOrderResponse(
+        data,
+        createdByStaffMap
+      ),
+      tracking,
+      trackingReady: !!tracking
+    });
+  } catch (error) {
+    console.error("Staff table order create error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create staff table order"
     });
   }
 });
@@ -1487,10 +1936,15 @@ router.patch("/orders/:id/status", requireStaffAuth, async (req, res) => {
       });
     }
 
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, [data]);
+
     res.json({
       success: true,
       message: "Order status updated",
-      order: buildStaffOrderResponse(data)
+      order: buildStaffOrderResponse(
+        data,
+        createdByStaffMap
+      )
     });
   } catch (error) {
     console.error("Staff order status update error:", error);
@@ -1577,10 +2031,15 @@ router.patch("/orders/:id/mark-billed", requireStaffAuth, requireStaffManagerAcc
       throw error;
     }
 
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, [data]);
+
     res.json({
       success: true,
       message: "Order marked billed",
-      order: buildStaffOrderResponse(data)
+      order: buildStaffOrderResponse(
+        data,
+        createdByStaffMap
+      )
     });
   } catch (error) {
     console.error("Staff mark billed error:", error);
@@ -1662,10 +2121,15 @@ router.patch("/orders/:id/mark-paid", requireStaffAuth, requireStaffManagerAcces
       throw error;
     }
 
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, [data]);
+
     res.json({
       success: true,
       message: "Order marked paid",
-      order: buildStaffOrderResponse(data)
+      order: buildStaffOrderResponse(
+        data,
+        createdByStaffMap
+      )
     });
   } catch (error) {
     console.error("Staff mark paid error:", error);
@@ -1731,10 +2195,12 @@ router.patch("/orders/:id/mark-family-billed", requireStaffAuth, requireStaffMan
       }
     });
 
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, updatedOrders);
+
     res.json({
       success: true,
       message: `Marked ${updatedOrders.length} linked order${updatedOrders.length === 1 ? "" : "s"} billed`,
-      orders: updatedOrders.map(buildStaffOrderResponse)
+      orders: updatedOrders.map((order) => buildStaffOrderResponse(order, createdByStaffMap))
     });
   } catch (error) {
     if (isMissingOrderBillingColumnsError(error)) {
@@ -1809,10 +2275,12 @@ router.patch("/orders/:id/mark-family-paid", requireStaffAuth, requireStaffManag
       }
     });
 
+    const createdByStaffMap = await getOrderCreatedByStaffMap(supabase, updatedOrders);
+
     res.json({
       success: true,
       message: `Marked ${updatedOrders.length} linked order${updatedOrders.length === 1 ? "" : "s"} paid`,
-      orders: updatedOrders.map(buildStaffOrderResponse)
+      orders: updatedOrders.map((order) => buildStaffOrderResponse(order, createdByStaffMap))
     });
   } catch (error) {
     if (isMissingOrderBillingColumnsError(error)) {
