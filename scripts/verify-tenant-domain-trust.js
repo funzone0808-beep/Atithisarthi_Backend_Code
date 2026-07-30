@@ -128,7 +128,7 @@ function main() {
   if (
     !hasPattern(
       tenantRoutesSource,
-      /const\s*\{\s*extractConfiguredSubdomainLabel,\s*isTrustedConfiguredSubdomainHost,\s*normalizePublicHostname\s*\}\s*=\s*require\("\.\.\/utils\/public-hotel-access"\);/m
+      /const\s*\{\s*extractConfiguredSubdomainLabel,\s*isTrustedConfiguredSubdomainHost,\s*normalizePublicHostname,\s*resolveConfiguredTenantHostAlias\s*\}\s*=\s*require\("\.\.\/utils\/public-hotel-access"\);/m
     )
   ) {
     failures.push("tenant.js is not importing the shared hostname trust helpers from public-hotel-access.js");

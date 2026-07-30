@@ -25,6 +25,7 @@ port: Number(getEnv("PORT", "10000")),
     getEnv("QR_CONTEXT_STRICT_REQUIRED", "false") === "true",
   frontendUrl: getEnv("FRONTEND_URL", " "),
   frontendOrigins: getEnv("FRONTEND_ORIGINS", ""),
+  publicTenantHostAliases: getEnv("PUBLIC_TENANT_HOST_ALIASES", ""),
   adminUrl: getEnv("ADMIN_URL", " "),
   notificationDeliveryEnabled:
     getEnv("NOTIFICATION_DELIVERY_ENABLED", "false") === "true",

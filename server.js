@@ -40,6 +40,9 @@ const {
   publicLoginBrandingRouter,
   adminLoginBrandingRouter
 } = require("./routes/login-branding");
+const {
+  getConfiguredTenantAliasOrigins
+} = require("./utils/public-hotel-access");
 
 const app = express();
 //const PORT = 5000;
@@ -233,7 +236,8 @@ const parseOriginList = (value = "") =>
 const allowedOrigins = [
   env.frontendUrl,
   env.adminUrl,
-  ...parseOriginList(env.frontendOrigins)
+  ...parseOriginList(env.frontendOrigins),
+  ...getConfiguredTenantAliasOrigins()
 ]
   .map(normalizeOrigin)
   .filter(Boolean)

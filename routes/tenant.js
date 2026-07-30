@@ -3,7 +3,8 @@ const { supabase } = require("../utils/supabase");
 const {
   extractConfiguredSubdomainLabel,
   isTrustedConfiguredSubdomainHost,
-  normalizePublicHostname
+  normalizePublicHostname,
+  resolveConfiguredTenantHostAlias
 } = require("../utils/public-hotel-access");
 
 const router = express.Router();
@@ -74,9 +75,25 @@ router.get("/resolve", async (req, res) => {
       .eq("primary_domain", normalizedHost)
       .eq("is_active", true)
       .maybeSingle();
-
     if (error) throw error;
+    // Exact deployment-host aliases support safe preview/staging hostnames
+    // without replacing a hotel's real primary domain or enabling ?hotel=.
+    if (!data) {
+      const aliasedHotelSlug =
+        resolveConfiguredTenantHostAlias(normalizedHost);
 
+      if (aliasedHotelSlug) {
+        const aliasResult = await supabase
+          .from("hotels")
+          .select(PUBLIC_TENANT_FIELDS)
+          .eq("slug", aliasedHotelSlug)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (aliasResult.error) throw aliasResult.error;
+        data = aliasResult.data;
+      }
+    }
     // If not found, try subdomain match against first hostname label
     if (!data) {
       const subdomainPart =

@@ -47,6 +47,85 @@ function isLocalPublicHostname(hostname = "") {
   );
 }
 
+function normalizePublicHotelSlug(value = "") {
+  const slug = normalizePublicText(value, 120).toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$/.test(slug)
+    ? slug
+    : "";
+}
+
+function isValidPublicAliasHostname(hostname = "") {
+  if (!hostname || hostname.length > 253 || !hostname.includes(".")) {
+    return false;
+  }
+
+  return hostname.split(".").every(
+    (label) =>
+      label.length > 0 &&
+      label.length <= 63 &&
+      /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  );
+}
+
+function parseConfiguredTenantHostAliases(
+  value = env.publicTenantHostAliases
+) {
+  const aliasesByHost = new Map();
+
+  String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .forEach((entry) => {
+      const separatorIndex = entry.indexOf("=");
+
+      if (separatorIndex <= 0) {
+        return;
+      }
+
+      const rawHostname = entry
+        .slice(0, separatorIndex)
+        .trim()
+        .toLowerCase();
+      const hostname = normalizePublicHostname(rawHostname);
+      const hotelSlug = normalizePublicHotelSlug(
+        entry.slice(separatorIndex + 1)
+      );
+
+      if (
+        rawHostname !== hostname ||
+        !isValidPublicAliasHostname(hostname) ||
+        isLocalPublicHostname(hostname) ||
+        !hotelSlug ||
+        aliasesByHost.has(hostname)
+      ) {
+        return;
+      }
+
+      aliasesByHost.set(hostname, hotelSlug);
+    });
+
+  return [...aliasesByHost.entries()].map(([hostname, hotelSlug]) => ({
+    hostname,
+    hotelSlug
+  }));
+}
+
+function resolveConfiguredTenantHostAlias(hostname = "") {
+  const normalizedHostname = normalizePublicHostname(hostname);
+  const alias = parseConfiguredTenantHostAliases().find(
+    (entry) => entry.hostname === normalizedHostname
+  );
+
+  return alias?.hotelSlug || "";
+}
+
+function getConfiguredTenantAliasOrigins() {
+  return parseConfiguredTenantHostAliases().map(
+    ({ hostname }) => `https://${hostname}`
+  );
+}
+
 function parseConfiguredPublicHosts() {
   const configuredValues = [env.frontendUrl, env.frontendOrigins]
     .flatMap((value) => String(value || "").split(","))
@@ -169,6 +248,16 @@ function doesOriginMatchHotel(originHost = "", hotel = {}) {
 
   const primaryDomain = normalizePublicHostname(hotel.primary_domain || "");
   const subdomain = normalizePublicText(hotel.subdomain || "", 120).toLowerCase();
+  const aliasedHotelSlug = resolveConfiguredTenantHostAlias(
+    normalizedOriginHost
+  );
+
+  if (
+    aliasedHotelSlug &&
+    aliasedHotelSlug === normalizePublicHotelSlug(hotel.slug || "")
+  ) {
+    return true;
+  }
 
   if (!primaryDomain && !subdomain) {
     return true;
@@ -229,9 +318,12 @@ module.exports = {
   extractPublicRequestOriginHost,
   fetchPublicHotelAccess,
   extractConfiguredSubdomainLabel,
+  getConfiguredTenantAliasOrigins,
   isLocalPublicHostname,
   isTrustedConfiguredSubdomainHost,
   getTrustedPublicSubdomainParentHosts,
   normalizePublicHostname,
-  normalizePublicText
+  normalizePublicText,
+  parseConfiguredTenantHostAliases,
+  resolveConfiguredTenantHostAlias
 };
