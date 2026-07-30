@@ -108,6 +108,13 @@ function updatePageRuntimeConfig(filePath, runtimeConfig) {
     { required: false }
   );
 
+  nextSource = replaceMetaContent(
+    nextSource,
+    "app-room-combined-checkout-frontend-enabled",
+    runtimeConfig.roomCombinedCheckoutFrontendEnabled,
+    { required: false }
+  );
+
   if (nextSource !== originalSource) {
     fs.writeFileSync(filePath, nextSource, "utf8");
     return true;
@@ -131,6 +138,10 @@ function main() {
     getEnv("APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT"),
     "false"
   );
+  const roomCombinedCheckoutFrontendEnabled = normalizeBooleanText(
+    getEnv("APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED"),
+    "false"
+  );
 
   if (!backendBaseUrl) {
     throw new Error("APP_BACKEND_BASE_URL is required.");
@@ -146,9 +157,9 @@ function main() {
     backendBaseUrl,
     apiBaseUrl,
     contactSheetUrl,
-    allowOrderWhatsAppFallbackOnSaveFailure
-    ,
-    openWhatsAppAfterVerifiedOnlinePayment
+    allowOrderWhatsAppFallbackOnSaveFailure,
+    openWhatsAppAfterVerifiedOnlinePayment,
+    roomCombinedCheckoutFrontendEnabled
   };
 
   const changedPages = [];

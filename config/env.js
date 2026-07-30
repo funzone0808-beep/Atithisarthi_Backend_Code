@@ -40,6 +40,8 @@ port: Number(getEnv("PORT", "10000")),
 
   paymentGatewayEnabled:
     getEnv("PAYMENT_GATEWAY_ENABLED", "false") === "true",
+  roomCombinedCheckoutEnabled:
+    getEnv("ROOM_COMBINED_CHECKOUT_ENABLED", "false") === "true",
   paymentGatewayProvider: getEnv("PAYMENT_GATEWAY_PROVIDER", "razorpay"),
   paymentGatewayCurrency: getEnv("PAYMENT_GATEWAY_CURRENCY", "INR"),
   paymentRouteTransfersEnabled:

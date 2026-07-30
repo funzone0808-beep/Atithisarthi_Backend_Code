@@ -1,0 +1,19 @@
+-- Disable secure QR routes before rollback. Existing orders/order_rounds remain intact.
+revoke all on function public.correct_secure_qr_submission_staff(text,uuid,bigint,text,text,text,jsonb,jsonb,text,text,text,text,text)
+  from public, anon, authenticated, service_role;
+drop function if exists public.correct_secure_qr_submission_staff(text,uuid,bigint,text,text,text,jsonb,jsonb,text,text,text,text,text);
+drop table if exists public.qr_staff_idempotency_records;
+revoke all on function public.edit_secure_qr_submission(text,uuid,bigint,text,text,jsonb,jsonb,text,text)
+  from public, anon, authenticated, service_role;
+drop function if exists public.edit_secure_qr_submission(text,uuid,bigint,text,text,jsonb,jsonb,text,text);
+drop function if exists public.replace_qr_order_totals(jsonb,jsonb,jsonb);
+revoke all on function public.submit_secure_qr_table_order(text,text,text,text,jsonb,text)
+  from public, anon, authenticated, service_role;
+drop function if exists public.submit_secure_qr_table_order(text,text,text,text,jsonb,text);
+drop function if exists public.merge_qr_order_totals(jsonb,jsonb);
+drop table if exists public.qr_event_outbox;
+drop table if exists public.qr_security_events;
+drop table if exists public.qr_idempotency_records;
+drop table if exists public.qr_order_submissions;
+drop table if exists public.qr_customer_sessions;
+drop table if exists public.restaurant_table_qr_tokens;

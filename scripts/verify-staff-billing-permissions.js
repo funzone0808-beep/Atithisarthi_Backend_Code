@@ -29,19 +29,19 @@ function main() {
   const protectedRouteChecks = [
     {
       label: "mark-billed route",
-      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-billed",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*async\s*\(req,\s*res\)\s*=>/m
+      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-billed",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*requireStaffFoodModule,\s*async\s*\(req,\s*res\)\s*=>/m
     },
     {
       label: "mark-paid route",
-      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-paid",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*async\s*\(req,\s*res\)\s*=>/m
+      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-paid",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*requireStaffFoodModule,\s*async\s*\(req,\s*res\)\s*=>/m
     },
     {
       label: "mark-family-billed route",
-      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-family-billed",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*async\s*\(req,\s*res\)\s*=>/m
+      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-family-billed",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*requireStaffFoodModule,\s*async\s*\(req,\s*res\)\s*=>/m
     },
     {
       label: "mark-family-paid route",
-      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-family-paid",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*async\s*\(req,\s*res\)\s*=>/m
+      pattern: /router\.patch\(\s*"\/orders\/:id\/mark-family-paid",\s*requireStaffAuth,\s*requireStaffManagerAccess,\s*requireStaffFoodModule,\s*async\s*\(req,\s*res\)\s*=>/m
     }
   ];
 
@@ -60,12 +60,34 @@ function main() {
     failures.push("manager-access middleware message is missing or changed unexpectedly");
   }
 
-  if (!hasPattern(staffOrdersSource, /const\s+canManageBilling\s*=\s*isStaffManagerSession\(\);/m)) {
-    failures.push("staff orders frontend is missing the manager-session billing gate");
+  if (
+    !hasPattern(
+      staffOrdersSource,
+      /function\s+canStaffViewOrderFinancials\(order\s*=\s*\{\}\)\s*\{[\s\S]*isStaffManagerSession\(\)[\s\S]*financialsVisible\s*!==\s*false/m
+    )
+  ) {
+    failures.push("staff orders frontend is missing the manager and response-visibility financial gate");
+  }
+
+  if (!hasPattern(staffOrdersSource, /const\s+canManageBilling\s*=\s*canViewFinancials;/m)) {
+    failures.push("staff orders frontend is missing the financial-visibility billing gate");
   }
 
   if (!hasPattern(staffOrdersSource, /const\s+billingActionButtons\s*=\s*canManageBilling/m)) {
     failures.push("staff orders frontend no longer gates billing action buttons behind canManageBilling");
+  }
+
+  if (!hasPattern(staffRoutesSource, /function\s+stripStaffOrderItemFinancials\(value\)/m)) {
+    failures.push("backend staff order responses are missing item financial-field sanitization");
+  }
+
+  if (
+    !hasPattern(
+      staffRoutesSource,
+      /financialsVisible:\s*!!includeFinancials[\s\S]*paymentMethod:\s*includeFinancials[\s\S]*items:\s*includeFinancials[\s\S]*totals:[\s\S]*includeFinancials[\s\S]*routeTransfer:\s*includeFinancials/m
+    )
+  ) {
+    failures.push("backend staff order response shaping no longer gates financial fields");
   }
 
   if (failures.length) {
@@ -78,7 +100,7 @@ function main() {
 
   console.log("Staff billing permission guard looks ready.");
   console.log("Verified manager-only protection for billed/paid and family billed/paid actions.");
-  console.log("Verified manager-session UI gating for money-state buttons in the staff orders page.");
+  console.log("Verified manager-only response shaping and UI gating for saved-order financial data.");
 }
 
 main();

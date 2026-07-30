@@ -99,6 +99,10 @@ function main() {
     getEnv("APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT"),
     "false"
   );
+  const expectedRoomCombinedCheckoutFrontendEnabled = normalizeBooleanText(
+    getEnv("APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED"),
+    "false"
+  );
   const allowedLegacyRuntimeValues = new Set(
     [expectedBackendBaseUrl, expectedApiBaseUrl].filter(Boolean)
   );
@@ -132,6 +136,10 @@ function main() {
     const verifiedPaymentWhatsAppMetaValue = extractMetaContent(
       source,
       "app-open-whatsapp-after-verified-online-payment"
+    );
+    const roomCombinedCheckoutFrontendMetaValue = extractMetaContent(
+      source,
+      "app-room-combined-checkout-frontend-enabled"
     );
 
     if (backendMetaValue === null) {
@@ -197,6 +205,20 @@ function main() {
       addIssue(
         issues,
         `${pageName} app-open-whatsapp-after-verified-online-payment does not match APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT.`
+      );
+    }
+
+    if (roomCombinedCheckoutFrontendMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-room-combined-checkout-frontend-enabled">.`
+      );
+    } else if (
+      roomCombinedCheckoutFrontendMetaValue !== expectedRoomCombinedCheckoutFrontendEnabled
+    ) {
+      addIssue(
+        issues,
+        `${pageName} app-room-combined-checkout-frontend-enabled does not match APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED.`
       );
     }
 

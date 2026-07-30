@@ -7,6 +7,7 @@ create table if not exists public.notification_events (
   source_type text not null,
   source_id text not null,
   event_type text not null,
+  dedupe_key text,
   delivery_channel text not null default 'internal',
   status text not null default 'pending',
   payload jsonb not null default '{}'::jsonb,
@@ -53,6 +54,9 @@ create index if not exists idx_notification_events_status_created_at
 
 create index if not exists idx_notification_events_source
   on public.notification_events (source_type, source_id);
+create unique index if not exists idx_notification_events_hotel_dedupe
+  on public.notification_events (hotel_slug, dedupe_key)
+  where dedupe_key is not null;
 
 comment on table public.notification_events is
   'Operational notification event log for hotel order, reservation, inquiry, contact, testimonial, and support alerts.';

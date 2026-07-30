@@ -4,8 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
 const { env } = require("./config/env");
 const logger = require("./utils/logger");
+const { startQrOutboxWorker, stopQrOutboxWorker } = require("./utils/qr-outbox");
 const {
   attachRequestContext,
   logRequestLifecycle
@@ -17,14 +19,27 @@ const contactSubmissionsRoute = require("./routes/contact-submissions");
 const reservationsRoute = require("./routes/reservations");
 const testimonialsRoute = require("./routes/testimonials");
 const adminRoute = require("./routes/admin");
+const adminRoomBookingRoute = require("./routes/admin-room-booking");
 const tenantRoute = require("./routes/tenant");
 const publicRoute = require("./routes/public");
+const publicQrRoute = require("./routes/public-qr");
+const publicRoomBookingRoute = require("./routes/public-room-booking");
 const publicAssistantRoute = require("./routes/public-assistant");
 const authRoute = require("./routes/auth");
 const staffRoute = require("./routes/staff");
+const staffNotificationsRoute = require("./routes/staff-notifications");
+const staffRoomBookingRoute = require("./routes/staff-room-booking");
+const staffRoomManagementRoute = require("./routes/staff-room-management");
+const staffRoomCheckoutBillRoute = require("./routes/staff-room-checkout-bill");
+const staffFoodOrderBillRoute = require("./routes/staff-food-order-bill");
+const adminRoomCheckoutBillRoute = require("./routes/admin-room-checkout-bill");
 const uploadRoute = require("./routes/upload");
 const paymentsRoute = require("./routes/payments");
 const paymentWebhooksRoute = require("./routes/payment-webhooks");
+const {
+  publicLoginBrandingRouter,
+  adminLoginBrandingRouter
+} = require("./routes/login-branding");
 
 const app = express();
 //const PORT = 5000;
@@ -140,7 +155,8 @@ const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 300,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => String(req.originalUrl || req.url || "").startsWith("/api/staff")
 });
 
 const authLimiter = rateLimit({
@@ -151,6 +167,48 @@ const authLimiter = rateLimit({
   message: {
     success: false,
     message: "Too many login attempts. Please try again later."
+  }
+});
+
+function getStaffRateLimitKey(req) {
+  const authHeader = String(req.headers.authorization || "").trim();
+
+  if (authHeader.startsWith("Bearer ")) {
+    return `staff:${crypto.createHash("sha256").update(authHeader).digest("hex").slice(0, 32)}`;
+  }
+
+  return `staff-ip:${rateLimit.ipKeyGenerator(req.ip)}`;
+}
+
+function isStaffLoginRequest(req) {
+  return String(req.originalUrl || req.url || "").split("?")[0] === "/api/staff/login";
+}
+
+const staffReadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 1200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getStaffRateLimitKey,
+  skip: (req) => isStaffLoginRequest(req) || !["GET", "HEAD", "OPTIONS"].includes(req.method),
+  message: {
+    success: false,
+    code: "STAFF_READ_RATE_LIMITED",
+    message: "Staff live updates are temporarily limited. Please wait and retry."
+  }
+});
+
+const staffMutationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getStaffRateLimitKey,
+  skip: (req) => isStaffLoginRequest(req) || ["GET", "HEAD", "OPTIONS"].includes(req.method),
+  message: {
+    success: false,
+    code: "STAFF_MUTATION_RATE_LIMITED",
+    message: "Too many staff updates were submitted. Please wait and retry."
   }
 });
 
@@ -199,7 +257,7 @@ app.use(
 
       return callback(new Error("Not allowed by CORS"));
     },
-    credentials: false
+    credentials: true
   })
 );
 
@@ -244,12 +302,24 @@ app.use("/api/inquiries", inquiriesRoute);
 app.use("/api/contact-submissions", contactSubmissionsRoute);
 app.use("/api/reservations", reservationsRoute);
 app.use("/api/testimonials", testimonialsRoute);
+app.use("/api/admin/room-booking", adminRoomBookingRoute);
+app.use("/api/admin/room-checkout-bill", adminRoomCheckoutBillRoute);
+app.use("/api/admin/login-branding", adminLoginBrandingRouter);
 app.use("/api/admin", adminRoute);
 app.use("/api/tenant", tenantRoute);
+app.use("/api/public/rooms", publicRoomBookingRoute);
+app.use("/api/public/login-branding", publicLoginBrandingRouter);
 app.use("/api/public", publicRoute);
+app.use("/api/public/qr", publicQrRoute);
 app.use("/api/public/assistant", publicAssistantRoute);
 app.use("/api/auth", authRoute);
 app.use("/api/staff/login", authLimiter);
+app.use("/api/staff", staffReadLimiter, staffMutationLimiter);
+app.use("/api/staff/notifications", staffNotificationsRoute);
+app.use("/api/staff/room-booking", staffRoomBookingRoute);
+app.use("/api/staff/room-management", staffRoomManagementRoute);
+app.use("/api/staff/room-checkout-bill", staffRoomCheckoutBillRoute);
+app.use("/api/staff/food-order-bill", staffFoodOrderBillRoute);
 app.use("/api/staff", staffRoute);
 app.use("/api/payments", paymentsRoute);
 app.use("/api/admin/upload", uploadRoute);
@@ -284,12 +354,19 @@ logger.error("Unhandled server error", {
 // });
 
 try {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     logger.info("Server started", {
       port: PORT,
       nodeEnv: env.nodeEnv
     });
+    startQrOutboxWorker();
   });
+  const shutdown = () => {
+    stopQrOutboxWorker();
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 } catch (error) {
   logger.error("Server failed to start", {
     message: error.message,

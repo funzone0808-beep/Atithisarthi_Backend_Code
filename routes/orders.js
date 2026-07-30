@@ -8,7 +8,21 @@ const {
 } = require("../utils/order-tracking");
 const { publicOrderLimiter } = require("../middleware/public-rate-limiters");
 const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
+const { ensureHotelFeatureEnabled } = require("../middleware/require-hotel-feature");
 const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
+const {
+  buildCustomerOrderingDisabledPayload,
+  buildPaymentMethodDisabledPayload,
+  fetchHotelOrderingSettings,
+  isHotelPaymentMethodEnabled,
+  normalizePaymentMethod
+} = require("../utils/hotel-ordering-settings");
+const {
+  buildOrderItemSnapshots,
+  buildComboSummaryLine
+} = require("../utils/order-item-snapshots");
+const { validateRequestedMenuCombos } = require("../utils/menu-combos");
+const { resolveTableForOrder } = require("../utils/restaurant-tables");
 
 // ✅ Added imports
 const { validateBody } = require("../validators/common");
@@ -223,7 +237,7 @@ async function getHotelPricingContext(hotelSlug) {
 
   const { data, error } = await supabase
     .from("hotel_profiles")
-    .select("hotel_slug,hotel_name,gst_percent,theme")
+    .select("hotel_slug,hotel_name,gst_percent,theme,owner_upi_id")
     .eq("hotel_slug", normalizedHotelSlug)
     .maybeSingle();
 
@@ -241,7 +255,7 @@ async function getHotelPricingContext(hotelSlug) {
 async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("item_id,name,price")
+    .select("hotel_slug,item_id,name,price,item_type")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -270,19 +284,22 @@ async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod, 
     };
   }
 
-  const verifiedItems = (items || []).map((item) => {
-    const itemId = String(item.id || "");
-    const menuItem = menuItemsById.get(itemId);
-    const qty = Number(item.qty || 0);
-    const price = Number(menuItem.price || 0);
+  const comboValidation = await validateRequestedMenuCombos({
+    hotelSlug: hotel.hotel_slug,
+    requestedItems: items || [],
+    menuItemRows: Array.from(menuItemsById.values())
+  });
 
+  if (!comboValidation.ok) {
     return {
-      id: itemId,
-      name: menuItem.name || itemId,
-      qty,
-      price,
-      lineTotal: price * qty
+      error: comboValidation.error || "Some combo items are unavailable right now"
     };
+  }
+
+  const verifiedItems = await buildOrderItemSnapshots({
+    hotelSlug: hotel.hotel_slug,
+    requestedItems: items || [],
+    menuItemRows: Array.from(menuItemsById.values())
   });
   const subtotal = verifiedItems.reduce((sum, item) => sum + item.lineTotal, 0);
   const gstPercent = Number(hotel.gst_percent || 5);
@@ -347,6 +364,11 @@ function buildVerifiedOrderSummary({
   lines.push("");
   (items || []).forEach((item) => {
     lines.push(`${item.name} x${item.qty} = ${formatMoney(item.price * item.qty)}`);
+    const comboSummaryLine = buildComboSummaryLine(item);
+
+    if (comboSummaryLine) {
+      lines.push(comboSummaryLine);
+    }
   });
   lines.push("");
   lines.push(`Subtotal = ${formatMoney(totals.subtotal)}`);
@@ -470,6 +492,23 @@ async function insertOrderRow(baseOrderRow, optionalOrderColumns = {}, logMeta =
     .single();
 }
 
+function isActiveTableOrderUniqueConflict(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "23505" &&
+    (
+      details.includes("uq_orders_one_active_root_dine_in_table") ||
+      details.includes("orders_one_active_root_dine_in_table_guard") ||
+      details.includes("lower(btrim(hotel_slug))") ||
+      details.includes("lower(btrim(table_number))")
+    )
+  );
+}
+
 // ✅ Middleware added here
 router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res) => {
   let requestHotelSlug = "";
@@ -505,6 +544,19 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
       return;
     }
 
+    if (!(await ensureHotelFeatureEnabled(res, { featureKey: "food", hotelSlug }))) {
+      return;
+    }
+
+    const orderingSettings = await fetchHotelOrderingSettings(hotelSlug);
+
+    if (orderingSettings.customerOrderingEnabled === false) {
+      return res.status(403).json(buildCustomerOrderingDisabledPayload(orderingSettings));
+    }
+    if (!isHotelPaymentMethodEnabled(orderingSettings, paymentMethod)) {
+      return res.status(409).json(buildPaymentMethodDisabledPayload(orderingSettings, paymentMethod));
+    }
+
     const resolvedOrderContext = resolveVerifiedQrOrderContext({
       hotelSlug,
       orderContext
@@ -517,7 +569,25 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
       });
     }
 
-    requestOrderContext = resolvedOrderContext.orderContext;
+    const tableResolution = hasDineInTableContext(resolvedOrderContext.orderContext)
+      ? await resolveTableForOrder({
+          hotelSlug,
+          tableNumber: resolvedOrderContext.orderContext.tableNumber,
+          enforceTableMaster: orderingSettings.enforceTableMaster
+        })
+      : null;
+
+    if (tableResolution && !tableResolution.ok) {
+      return res.status(tableResolution.status || 400).json({
+        success: false,
+        code: tableResolution.code,
+        message: tableResolution.message
+      });
+    }
+
+    requestOrderContext = tableResolution
+      ? { ...resolvedOrderContext.orderContext, tableNumber: tableResolution.tableNumber }
+      : resolvedOrderContext.orderContext;
 
     const requestLogMeta = getOrderLogMeta({
       requestId: req.requestId,
@@ -543,6 +613,17 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
             message: verifiedPricing.error
           }
         ]
+      });
+    }
+
+    if (
+      normalizePaymentMethod(paymentMethod) === "manual_upi" &&
+      !String(verifiedPricing.hotel?.owner_upi_id || "").trim()
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: "PAYMENT_METHOD_NOT_CONFIGURED",
+        message: "Google Pay / UPI is not configured for this hotel. Please choose another payment method."
       });
     }
 
@@ -586,6 +667,9 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
     const optionalOrderColumns = {
       ...orderContextColumns,
       ...billingMetadataColumns,
+      ...(tableResolution?.restaurantTableId
+        ? { restaurant_table_id: tableResolution.restaurantTableId }
+        : {}),
       ...getOrderTrackingColumns()
     };
     const { data, error } = await insertOrderRow(
@@ -645,6 +729,14 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
     });
 
   } catch (error) {
+    if (hasDineInTableContext(requestOrderContext) && isActiveTableOrderUniqueConflict(error)) {
+      return res.status(409).json({
+        success: false,
+        code: "TABLE_HAS_ACTIVE_ORDER",
+        message: "This table already has an active order. Open the existing order instead."
+      });
+    }
+
     logger.error("Order save error", {
       ...getOrderLogMeta({
         requestId: req.requestId,
@@ -661,4 +753,7 @@ router.post("/", publicOrderLimiter, validateBody(orderSchema), async (req, res)
   }
 });
 
+router.calculateVerifiedOrderPricing = calculateVerifiedOrderPricing;
+router.buildVerifiedOrderSummary = buildVerifiedOrderSummary;
+router.isActiveTableOrderUniqueConflict = isActiveTableOrderUniqueConflict;
 module.exports = router;

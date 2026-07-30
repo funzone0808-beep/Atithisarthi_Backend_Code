@@ -119,6 +119,30 @@ Expected result:
 
 Stop if payment readiness fails and online payment is meant to be live.
 
+## 3a. Room combined checkout production gate
+
+Keep `ROOM_COMBINED_CHECKOUT_ENABLED=false` and `ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED=false` for production unless the staging-only combined checkout runbook has passed and production enablement is separately approved.
+
+Before enabling `ROOM_COMBINED_CHECKOUT_ENABLED=true` in any production environment, confirm:
+
+```powershell
+npm.cmd run verify:room-checkout-runbook
+npm.cmd run verify:room-checkout-production-flags
+npm.cmd run verify:room-checkout-preflight
+npm.cmd run verify:room-checkout-migration
+```
+
+Also confirm `room-combined-checkout-staging-runbook.md` has been completed against a staging database, including `verify:room-checkout-staging` with `ROOM_CHECKOUT_STAGING_VERIFY="I_UNDERSTAND_STAGING_ONLY"`.
+
+Expected result:
+
+- The production backend and frontend remain disabled by default until staging is signed off and production enablement is separately approved.
+- The frontend-only production flag combination is blocked before any operator can see enabled combined checkout controls.
+- Admin and staff combined checkout buttons remain disabled in production unless both production flags are explicitly approved.
+- Food ordering, QR ordering, KDS, billing, admin login, staff login, and tenant isolation are smoke-tested after staging checkout verification.
+
+Stop if the staging runbook has not passed. Do not enable production combined checkout from this launch checklist alone.
+
 ## 4. Public homepage smoke test
 
 Open the production homepage for one hotel.
@@ -309,6 +333,7 @@ Launch only if:
 - Public order flow works.
 - QR order flow works if QR is being given to the hotel.
 - Payment readiness and webhook test pass if online payment is enabled.
+- Room combined checkout backend and frontend flags remain disabled unless the staging-only runbook has passed and production enablement is explicitly approved.
 - Admin and staff panels both work.
 - Tenant isolation test passes.
 

@@ -1,6 +1,11 @@
 const { supabase } = require("./supabase");
 const { env } = require("../config/env");
 const nodemailer = require("nodemailer");
+const {
+  buildNotificationDedupeKey,
+  isMissingNotificationDedupeColumnError,
+  isNotificationDedupeConflict
+} = require("./notification-dedupe");
 
 const NOTIFICATION_SOURCE_EVENT_TYPES = {
   order: "order_created",
@@ -59,15 +64,24 @@ function buildNotificationEventRecord({
     throw new Error("Notification sourceId is required");
   }
 
+  const normalizedPayload =
+    payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  const normalizedEventType = normalizeEventType(normalizedSourceType, eventType);
+
   return {
     hotel_slug: hotelSlug ? String(hotelSlug).trim() : null,
     source_type: normalizedSourceType,
     source_id: normalizedSourceId,
-    event_type: normalizeEventType(normalizedSourceType, eventType),
+    event_type: normalizedEventType,
+    dedupe_key: buildNotificationDedupeKey({
+      sourceType: normalizedSourceType,
+      sourceId: normalizedSourceId,
+      eventType: normalizedEventType,
+      payload: normalizedPayload
+    }),
     delivery_channel: NOTIFICATION_DELIVERY_CHANNEL,
     status: NOTIFICATION_PENDING_STATUS,
-    payload:
-      payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {},
+    payload: normalizedPayload,
     error_message: null,
     processed_at: null,
     updated_at: new Date().toISOString()
@@ -76,18 +90,40 @@ function buildNotificationEventRecord({
 
 async function createNotificationEvent(input = {}) {
   const record = buildNotificationEventRecord(input);
-
-  const { data, error } = await supabase
+  let result = await supabase
     .from("notification_events")
     .insert([record])
     .select()
     .single();
 
-  if (error) {
-    throw error;
+  if (result.error && isMissingNotificationDedupeColumnError(result.error)) {
+    const compatibilityRecord = { ...record };
+    delete compatibilityRecord.dedupe_key;
+    result = await supabase
+      .from("notification_events")
+      .insert([compatibilityRecord])
+      .select()
+      .single();
   }
 
-  return data;
+  if (result.error && isNotificationDedupeConflict(result.error) && record.dedupe_key) {
+    const existing = await supabase
+      .from("notification_events")
+      .select("*")
+      .eq("hotel_slug", record.hotel_slug)
+      .eq("dedupe_key", record.dedupe_key)
+      .maybeSingle();
+
+    if (!existing.error && existing.data) {
+      return existing.data;
+    }
+  }
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  return result.data;
 }
 
 function buildHotelNotificationSettings(settingsRow, hotelSlug = "") {
@@ -776,6 +812,8 @@ async function createNotificationEventSafely(input = {}) {
 
 module.exports = {
   buildHotelNotificationSettings,
+  buildNotificationDedupeKey,
+  buildNotificationEventRecord,
   createNotificationEvent,
   createNotificationEventSafely,
   fetchHotelNotificationSettings,

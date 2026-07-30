@@ -3,6 +3,7 @@ const { supabase } = require("../utils/supabase");
 const { publicReservationLimiter } = require("../middleware/public-rate-limiters");
 const { createNotificationEventSafely } = require("../utils/notifications");
 const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
+const { ensureHotelFeatureEnabled } = require("../middleware/require-hotel-feature");
 
 // ✅ Added imports
 const { validateBody } = require("../validators/common");
@@ -31,6 +32,10 @@ router.post("/", publicReservationLimiter, validateBody(reservationSchema), asyn
     });
 
     if (!hotelAccess) {
+      return;
+    }
+
+    if (!(await ensureHotelFeatureEnabled(res, { featureKey: "food", hotelSlug }))) {
       return;
     }
 

@@ -69,6 +69,13 @@ const publicReservationLimiter = createPublicLimiter({
   message: "Too many reservation requests. Please wait a moment and try again."
 });
 
+const publicRoomBookingLimiter = createPublicLimiter({
+  scope: "public-room-booking-create",
+  windowMs: 15 * 60 * 1000,
+  limit: 8,
+  message: "Too many room booking requests. Please wait a moment and try again."
+});
+
 const publicInquiryLimiter = createPublicLimiter({
   scope: "public-inquiry-create",
   windowMs: 15 * 60 * 1000,
@@ -104,5 +111,6 @@ module.exports = {
   publicOrderLimiter,
   publicPaymentInitLimiter,
   publicReservationLimiter,
+  publicRoomBookingLimiter,
   publicTestimonialSubmissionLimiter
 };

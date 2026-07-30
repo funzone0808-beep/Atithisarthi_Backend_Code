@@ -61,6 +61,7 @@ function isMissingOrderTrackingColumnsError(error) {
 module.exports = {
   ORDER_TRACKING_COLUMNS,
   buildOrderTrackingReference,
+  generateOrderTrackingToken,
   getOrderTrackingColumns,
   isMissingOrderTrackingColumnsError
 };

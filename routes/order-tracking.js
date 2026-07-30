@@ -7,9 +7,22 @@ const {
   isMissingOrderTrackingColumnsError
 } = require("../utils/order-tracking");
 const { createNotificationEventSafely } = require("../utils/notifications");
+const {
+  buildCustomerOrderingDisabledPayload,
+  fetchHotelOrderingSettings
+} = require("../utils/hotel-ordering-settings");
+const {
+  buildOrderItemSnapshots,
+  buildComboSummaryLine
+} = require("../utils/order-item-snapshots");
+const { validateRequestedMenuCombos } = require("../utils/menu-combos");
+const { requireHotelFeature } = require("../middleware/require-hotel-feature");
 
 const router = express.Router();
 const TRACKING_ROUTE_WINDOW_MS = 10 * 60 * 1000;
+const requirePublicFoodModule = requireHotelFeature("food", {
+  resolveHotelSlug: (req = {}) => req.params?.hotelSlug
+});
 
 function getTrackingRateLimitKey(req = {}) {
   const hotelSlug = String(req.params?.hotelSlug || "").trim().toLowerCase();
@@ -55,6 +68,11 @@ const TRACKING_SELECT_FULL = [
   "payment_status",
   "billing_status",
   "bill_number",
+  "room_id",
+  "room_booking_id",
+  "room_number",
+  "room_service_guest_name",
+  "room_service_charge_to_room",
   "items",
   "totals",
   "status",
@@ -78,7 +96,12 @@ const OPTIONAL_TRACKING_PUBLIC_COLUMNS = [
   "order_source",
   "payment_status",
   "billing_status",
-  "bill_number"
+  "bill_number",
+  "room_id",
+  "room_booking_id",
+  "room_number",
+  "room_service_guest_name",
+  "room_service_charge_to_room"
 ];
 const ADDON_ORDER_METADATA_COLUMNS = [
   "parent_order_id",
@@ -261,7 +284,7 @@ async function getHotelPricingContext(hotelSlug) {
 async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("item_id,name,price")
+    .select("hotel_slug,item_id,name,price,item_type")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -290,19 +313,22 @@ async function calculateVerifiedAddonPricing({ hotelSlug, items, paymentMethod }
     };
   }
 
-  const verifiedItems = (items || []).map((item) => {
-    const itemId = String(item.id || "");
-    const menuItem = menuItemsById.get(itemId);
-    const qty = Number(item.qty || 0);
-    const price = Number(menuItem.price || 0);
+  const comboValidation = await validateRequestedMenuCombos({
+    hotelSlug: hotel.hotel_slug,
+    requestedItems: items || [],
+    menuItemRows: Array.from(menuItemsById.values())
+  });
 
+  if (!comboValidation.ok) {
     return {
-      id: itemId,
-      name: menuItem.name || itemId,
-      qty,
-      price,
-      lineTotal: price * qty
+      error: comboValidation.error || "Some combo items are unavailable right now"
     };
+  }
+
+  const verifiedItems = await buildOrderItemSnapshots({
+    hotelSlug: hotel.hotel_slug,
+    requestedItems: items || [],
+    menuItemRows: Array.from(menuItemsById.values())
   });
   const subtotal = verifiedItems.reduce((sum, item) => sum + item.lineTotal, 0);
   const gstPercent = Number(hotel.gst_percent || 5);
@@ -399,6 +425,11 @@ function buildAddonOrderSummary({
 
   (items || []).forEach((item) => {
     lines.push(`${item.name} x${item.qty} = ${formatMoney(item.price * item.qty)}`);
+    const comboSummaryLine = buildComboSummaryLine(item);
+
+    if (comboSummaryLine) {
+      lines.push(comboSummaryLine);
+    }
   });
 
   lines.push("");
@@ -584,7 +615,17 @@ function getSafePublicOrderItems(items = []) {
     name: normalizePublicText(item?.name, 160),
     qty: Number(item?.qty || 0),
     price: Number(item?.price || 0),
-    lineTotal: Number(item?.lineTotal || (Number(item?.price || 0) * Number(item?.qty || 0)))
+    lineTotal: Number(item?.lineTotal || (Number(item?.price || 0) * Number(item?.qty || 0))),
+    itemType: normalizePublicText(item?.itemType || item?.item_type || "single", 20) || "single",
+    comboItems: Array.isArray(item?.comboItems)
+      ? item.comboItems.map((comboItem) => ({
+          itemId: normalizePublicText(comboItem?.itemId, 120),
+          name: normalizePublicText(comboItem?.name, 160),
+          quantity: Number(comboItem?.quantity || 0) || 0
+        }))
+      : [],
+    originalPrice: Number(item?.originalPrice || 0),
+    savings: Number(item?.savings || 0)
   }));
 }
 
@@ -633,6 +674,11 @@ function buildPublicTrackingOrder(order = {}, actions = {}, addOns = []) {
     paymentStatus: order.payment_status || "",
     billingStatus: order.billing_status || "",
     billNumber: order.bill_number || "",
+    roomService: {
+      roomNumber: order.room_number || "",
+      guestName: order.room_service_guest_name || "",
+      chargeToRoom: !!order.room_service_charge_to_room
+    },
     items: getSafePublicOrderItems(order.items),
     totals: getSafePublicTotals(order.totals),
     createdAt: order.created_at || "",
@@ -678,7 +724,7 @@ async function fetchPublicAddonOrders(baseOrder = {}) {
   return data || [];
 }
 
-router.post("/:hotelSlug/:orderId/support-requests", trackingSupportLimiter, async (req, res) => {
+router.post("/:hotelSlug/:orderId/support-requests", trackingSupportLimiter, requirePublicFoodModule, async (req, res) => {
   try {
     const hotelSlug = normalizePublicText(req.params.hotelSlug, 120);
     const orderId = normalizePublicText(req.params.orderId, 120);
@@ -825,7 +871,7 @@ router.post("/:hotelSlug/:orderId/support-requests", trackingSupportLimiter, asy
   }
 });
 
-router.post("/:hotelSlug/:orderId/add-items", async (req, res) => {
+router.post("/:hotelSlug/:orderId/add-items", requirePublicFoodModule, async (req, res) => {
   try {
     const hotelSlug = normalizePublicText(req.params.hotelSlug, 120);
     const orderId = normalizePublicText(req.params.orderId, 120);
@@ -847,6 +893,12 @@ router.post("/:hotelSlug/:orderId/add-items", async (req, res) => {
         success: false,
         message: "At least one add-on item is required"
       });
+    }
+
+    const orderingSettings = await fetchHotelOrderingSettings(hotelSlug);
+
+    if (orderingSettings.customerOrderingEnabled === false) {
+      return res.status(403).json(buildCustomerOrderingDisabledPayload(orderingSettings));
     }
 
     const { data: baseOrder, error: baseOrderError } = await fetchTrackedOrder({
@@ -1056,7 +1108,7 @@ router.post("/:hotelSlug/:orderId/add-items", async (req, res) => {
   }
 });
 
-router.get("/:hotelSlug/:orderId", trackingViewLimiter, async (req, res) => {
+router.get("/:hotelSlug/:orderId", trackingViewLimiter, requirePublicFoodModule, async (req, res) => {
   try {
     const hotelSlug = normalizePublicText(req.params.hotelSlug, 120);
     const orderId = normalizePublicText(req.params.orderId, 120);

@@ -25,7 +25,10 @@ function getRequestId(req) {
 }
 
 function getSafePath(req) {
-  return `${req.baseUrl || ""}${req.path || ""}` || req.originalUrl?.split("?")[0] || "/";
+  const path = `${req.baseUrl || ""}${req.path || ""}` || req.originalUrl?.split("?")[0] || "/";
+  return path
+    .replace(/(\/api\/public\/qr\/)[^/]+(?=\/(?:context|session|orders)(?:\/|$))/gi, "$1[redacted]")
+    .replace(/([?&](?:q|qctx|qrContextToken)=)[^&]+/gi, "$1[redacted]");
 }
 
 function getClientIp(req) {
@@ -65,6 +68,21 @@ function attachRequestContext(req, res, next) {
 
 function logRequestLifecycle(req, res, next) {
   const startedAt = process.hrtime.bigint();
+  const originalWriteHead = res.writeHead;
+
+  res.writeHead = function writeHeadWithServerTiming(...args) {
+    if (!res.headersSent) {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      const timingEntries = [`app;dur=${durationMs.toFixed(2)}`];
+      const dbDurationMs = Number(res.locals?.dbDurationMs);
+      if (Number.isFinite(dbDurationMs) && dbDurationMs >= 0) {
+        timingEntries.push(`db;dur=${dbDurationMs.toFixed(2)}`);
+      }
+      res.setHeader("server-timing", timingEntries.join(", "));
+    }
+
+    return originalWriteHead.apply(this, args);
+  };
 
   res.on("finish", () => {
     if (shouldSkipRequestLog(req)) return;
@@ -84,9 +102,13 @@ function logRequestLifecycle(req, res, next) {
       path: getSafePath(req),
       statusCode: res.statusCode || 0,
       durationMs: Number(durationMs.toFixed(2)),
+      dbDurationMs: Number.isFinite(Number(res.locals?.dbDurationMs))
+        ? Number(Number(res.locals.dbDurationMs).toFixed(2))
+        : undefined,
+      responseBytes: Number(res.getHeader("content-length") || 0) || undefined,
       ip: getClientIp(req),
       origin: req.headers.origin || "",
-      hotelHint: String(req.query?.hotel || req.query?.hotelSlug || "").trim()
+      hotelHint: String(req.staffHotelSlug || req.query?.hotel || req.query?.hotelSlug || "").trim()
     });
   });
 

@@ -5,6 +5,19 @@ const ADMIN_TOKEN_SCOPE = "admin";
 const STAFF_TOKEN_SCOPE = "hotel_staff";
 const STAFF_OWNER_ROLE = "owner";
 const STAFF_BASIC_ROLE = "staff";
+const STAFF_KDS_ROLES = ["general", "kitchen", "expo", "manager"];
+
+function normalizeStaffKdsRole(kdsRole = "", accountRole = "") {
+  if (normalizeStaffRole(accountRole) === STAFF_OWNER_ROLE) return "manager";
+  const normalizedRole = String(kdsRole || "").trim().toLowerCase();
+  return STAFF_KDS_ROLES.includes(normalizedRole) ? normalizedRole : "general";
+}
+
+function isStaffKdsRoleAllowed(kdsRole = "", allowedRoles = []) {
+  const normalizedRole = normalizeStaffKdsRole(kdsRole);
+  return normalizedRole === "manager" || normalizedRole === "general" ||
+    (Array.isArray(allowedRoles) && allowedRoles.includes(normalizedRole));
+}
 
 function normalizeStaffRole(role = "") {
   const normalizedRole = String(role || "")
@@ -60,7 +73,8 @@ function signStaffToken(staffAccess) {
       scope: STAFF_TOKEN_SCOPE,
       hotelSlug,
       displayName: staffAccess.display_name || staffAccess.displayName || "Staff",
-      role
+      role,
+      kdsRole: normalizeStaffKdsRole(staffAccess.kds_role || staffAccess.kdsRole, role)
     },
     env.jwtSecret,
     {
@@ -79,7 +93,8 @@ function verifyStaffToken(token) {
   return {
     ...decoded,
     role: normalizeStaffRole(decoded.role),
-    isManager: isStaffManagerRole(decoded.role)
+    isManager: isStaffManagerRole(decoded.role),
+    kdsRole: normalizeStaffKdsRole(decoded.kdsRole, decoded.role)
   };
 }
 
@@ -93,5 +108,8 @@ module.exports = {
   STAFF_OWNER_ROLE,
   STAFF_BASIC_ROLE,
   normalizeStaffRole,
-  isStaffManagerRole
+  isStaffManagerRole,
+  STAFF_KDS_ROLES,
+  normalizeStaffKdsRole,
+  isStaffKdsRoleAllowed
 };

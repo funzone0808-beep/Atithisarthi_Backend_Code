@@ -58,6 +58,10 @@ function main() {
       source,
       "app-open-whatsapp-after-verified-online-payment"
     );
+    const roomCombinedCheckoutFrontendMetaValue = extractMetaContent(
+      source,
+      "app-room-combined-checkout-frontend-enabled"
+    );
 
     if (backendMetaValue === null) {
       addIssue(
@@ -118,6 +122,18 @@ function main() {
       addIssue(
         issues,
         `${pageName} app-open-whatsapp-after-verified-online-payment should be blank in the neutral repo state.`
+      );
+    }
+
+    if (roomCombinedCheckoutFrontendMetaValue === null) {
+      addIssue(
+        issues,
+        `${pageName} is missing <meta name="app-room-combined-checkout-frontend-enabled">.`
+      );
+    } else if (roomCombinedCheckoutFrontendMetaValue !== "false") {
+      addIssue(
+        issues,
+        `${pageName} app-room-combined-checkout-frontend-enabled should be false in the neutral repo state.`
       );
     }
   });

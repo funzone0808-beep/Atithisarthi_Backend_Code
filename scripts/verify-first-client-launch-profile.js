@@ -33,6 +33,10 @@ function main() {
   const warnings = [];
 
   const paymentGatewayEnabled = getBooleanEnv("PAYMENT_GATEWAY_ENABLED", false);
+  const roomCombinedCheckoutEnabled = getBooleanEnv(
+    "ROOM_COMBINED_CHECKOUT_ENABLED",
+    false
+  );
   const fallbackOnSaveFailure = String(
     getEnv("APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE", "")
   ).trim().toLowerCase();
@@ -47,6 +51,9 @@ function main() {
   console.log("--------------------------------");
   console.log(`NODE_ENV: ${getEnv("NODE_ENV", "missing")}`);
   console.log(`PAYMENT_GATEWAY_ENABLED: ${paymentGatewayEnabled ? "true" : "false"}`);
+  console.log(
+    `ROOM_COMBINED_CHECKOUT_ENABLED: ${roomCombinedCheckoutEnabled ? "true" : "false"}`
+  );
   console.log(
     `APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE: ${fallbackOnSaveFailure || "missing"}`
   );
@@ -67,6 +74,13 @@ function main() {
     addIssue(
       issues,
       "APP_ALLOW_ORDER_WHATSAPP_FALLBACK_ON_SAVE_FAILURE should be false for first-client launch."
+    );
+  }
+
+  if (roomCombinedCheckoutEnabled) {
+    addIssue(
+      issues,
+      "ROOM_COMBINED_CHECKOUT_ENABLED should remain false for first-client launch until staging migration and RPC verification pass."
     );
   }
 

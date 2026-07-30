@@ -25,7 +25,17 @@ const {
   isMissingOrderTrackingColumnsError
 } = require("../utils/order-tracking");
 const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
+const { ensureHotelFeatureEnabled } = require("../middleware/require-hotel-feature");
 const { resolveVerifiedQrOrderContext } = require("../utils/qr-context");
+const {
+  buildCustomerOrderingDisabledPayload,
+  buildPaymentMethodDisabledPayload,
+  fetchHotelOrderingSettings,
+  isHotelPaymentMethodEnabled
+} = require("../utils/hotel-ordering-settings");
+const { buildOrderItemSnapshots } = require("../utils/order-item-snapshots");
+const { validateRequestedMenuCombos } = require("../utils/menu-combos");
+const { resolveTableForOrder } = require("../utils/restaurant-tables");
 
 const router = express.Router();
 const PAYMENT_GATEWAY_ORDER_COLUMNS = [
@@ -236,6 +246,20 @@ function isMissingPaymentGatewayColumnsError(error) {
   );
 }
 
+function isActiveTableOrderConflict(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = (
+    String(error?.message || "") + " " +
+    String(error?.details || "") + " " +
+    String(error?.hint || "")
+  ).toLowerCase();
+  return code === "23505" && (
+    details.includes("active table order") ||
+    details.includes("orders_one_active_root_dine_in_table_guard") ||
+    details.includes("uq_orders_one_active_root_dine_in_table")
+  );
+}
+
 function isMissingPaymentRouteSettingsTableError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
   const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
@@ -430,7 +454,7 @@ async function getHotelPaymentContext(hotelSlug) {
 async function getHotelMenuItemsById(hotelSlug, itemIds = []) {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("item_id,name,price")
+    .select("hotel_slug,item_id,name,price,item_type")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -460,18 +484,22 @@ async function calculateGatewayTotals({ hotelSlug, items, paymentMethod, orderCo
     };
   }
 
-  const normalizedItems = items.map((item) => {
-    const menuItem = menuItemsById.get(item.id);
-    const qty = Number(item.qty || 0);
-    const price = Number(menuItem.price || 0);
+  const comboValidation = await validateRequestedMenuCombos({
+    hotelSlug,
+    requestedItems: items,
+    menuItemRows: Array.from(menuItemsById.values())
+  });
 
+  if (!comboValidation.ok) {
     return {
-      id: item.id,
-      name: menuItem.name || item.id,
-      qty,
-      price,
-      lineTotal: price * qty
+      error: comboValidation.error || "Some combo items are unavailable right now"
     };
+  }
+
+  const normalizedItems = await buildOrderItemSnapshots({
+    hotelSlug,
+    requestedItems: items,
+    menuItemRows: Array.from(menuItemsById.values())
   });
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0);
   const gstPercent = Number(hotel.gst_percent || 5);
@@ -649,6 +677,7 @@ async function createPendingGatewayLinkedOrder({
   hotelSlug,
   paymentMethod,
   orderContext,
+  restaurantTableId,
   orderDraft,
   paymentContext,
   gatewayOrder,
@@ -677,18 +706,14 @@ async function createPendingGatewayLinkedOrder({
     customer_address: orderDraft.customerAddress,
     payment_method: getGatewayPaymentMethodLabel(paymentMethod),
     note: orderDraft.note || "",
-    items: paymentContext.items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      qty: item.qty,
-      price: item.price
-    })),
+    items: paymentContext.items,
     totals: buildPendingGatewayOrderTotals(paymentContext.totals),
     whatsapp_message: orderDraft.whatsappMessage || "",
     status: "payment_pending"
   };
   const optionalOrderColumns = {
     ...getGatewayOrderContextColumns(orderContext),
+    ...(restaurantTableId ? { restaurant_table_id: restaurantTableId } : {}),
     billing_status: "not_billed",
     payment_status: "unpaid",
     payment_gateway: config.provider,
@@ -1089,6 +1114,21 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       return;
     }
 
+    if (!(await ensureHotelFeatureEnabled(res, { featureKey: "food", hotelSlug }))) {
+      return;
+    }
+
+    const orderingSettings = await fetchHotelOrderingSettings(hotelSlug);
+
+    if (orderingSettings.customerOrderingEnabled === false) {
+      return res.status(403).json(buildCustomerOrderingDisabledPayload(orderingSettings));
+    }
+    if (!isHotelPaymentMethodEnabled(orderingSettings, "ONLINE_GATEWAY")) {
+      return res.status(409).json(
+        buildPaymentMethodDisabledPayload(orderingSettings, "ONLINE_GATEWAY")
+      );
+    }
+
     const resolvedOrderContext = resolveVerifiedQrOrderContext({
       hotelSlug,
       orderContext
@@ -1101,7 +1141,25 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       });
     }
 
-    const safeOrderContext = resolvedOrderContext.orderContext;
+    const tableResolution = hasGatewayDineInTableContext(resolvedOrderContext.orderContext)
+      ? await resolveTableForOrder({
+          hotelSlug,
+          tableNumber: resolvedOrderContext.orderContext.tableNumber,
+          enforceTableMaster: orderingSettings.enforceTableMaster
+        })
+      : null;
+
+    if (tableResolution && !tableResolution.ok) {
+      return res.status(tableResolution.status || 400).json({
+        success: false,
+        code: tableResolution.code,
+        message: tableResolution.message
+      });
+    }
+
+    const safeOrderContext = tableResolution
+      ? { ...resolvedOrderContext.orderContext, tableNumber: tableResolution.tableNumber }
+      : resolvedOrderContext.orderContext;
     paymentLogMeta = getPaymentLogMeta({
       requestId: req.requestId || "",
       hotelSlug,
@@ -1158,6 +1216,7 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       hotelSlug,
       paymentMethod,
       orderContext: safeOrderContext,
+      restaurantTableId: tableResolution?.restaurantTableId || null,
       orderDraft,
       paymentContext,
       gatewayOrder,
@@ -1203,6 +1262,14 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       items: paymentContext.items
     });
   } catch (error) {
+    if (isActiveTableOrderConflict(error)) {
+      return res.status(409).json({
+        success: false,
+        code: "TABLE_HAS_ACTIVE_ORDER",
+        message: "This table already has an active order. Open the existing order instead."
+      });
+    }
+
     logger.error("Payment init error", {
       ...paymentLogMeta,
       paymentStage: "init",

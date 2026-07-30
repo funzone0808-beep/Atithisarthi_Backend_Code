@@ -1,7 +1,21 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
-const { ensurePublicHotelAccess } = require("../utils/public-hotel-access");
+const {
+  ensurePublicHotelAccess,
+  normalizePublicText
+} = require("../utils/public-hotel-access");
+const { fetchHotelOrderingSettings } = require("../utils/hotel-ordering-settings");
+const { ensureHotelFeatureEnabled } = require("../middleware/require-hotel-feature");
+const {
+  fetchMenuComboPresentationMap,
+  isMenuComboPresentationCurrentlyAvailable,
+  isMissingMenuComboSchemaError
+} = require("../utils/menu-combos");
 
+const {
+  getCachedPublicRoutePayload,
+  setCachedPublicRoutePayload
+} = require("../utils/public-route-cache");
 const router = express.Router();
 const PUBLIC_ROUTE_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=120";
 const PUBLIC_ROUTE_CACHE_TTL_MS = 30 * 1000;
@@ -30,6 +44,7 @@ const PUBLIC_HOTEL_PROFILE_FIELDS = [
 
 const PUBLIC_MENU_FIELDS = [
   "item_id",
+  "item_type",
   "name",
   "description",
   "price",
@@ -64,6 +79,21 @@ const PUBLIC_TESTIMONIAL_FIELDS = [
   "is_active",
   "is_approved"
 ].join(",");
+const PUBLIC_POPUP_NOTIFICATION_FIELDS = [
+  "id",
+  "hotel_slug",
+  "title",
+  "description",
+  "image_url",
+  "storage_path",
+  "cta_text",
+  "cta_link",
+  "display_mode",
+  "start_at",
+  "end_at",
+  "priority",
+  "created_at"
+].join(",");
 
 function isMissingTestimonialsRelationError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
@@ -81,27 +111,95 @@ function isMissingTestimonialsRelationError(error) {
   );
 }
 
-function getCachedPublicRoutePayload(cacheKey) {
-  const cachedEntry = publicRouteCache.get(cacheKey);
+function isMissingPopupNotificationsRelationError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
 
-  if (!cachedEntry) {
-    return null;
-  }
-
-  if (cachedEntry.expiresAt <= Date.now()) {
-    publicRouteCache.delete(cacheKey);
-    return null;
-  }
-
-  return cachedEntry.payload;
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    (details.includes("hotel_popup_notifications") &&
+      (details.includes("relation") ||
+        details.includes("schema cache") ||
+        details.includes("could not find")))
+  );
 }
 
-function setCachedPublicRoutePayload(cacheKey, payload) {
-  publicRouteCache.set(cacheKey, {
-    expiresAt: Date.now() + PUBLIC_ROUTE_CACHE_TTL_MS,
-    payload
-  });
+function isPopupNotificationWithinActiveWindow(notification = {}, now = new Date()) {
+  const startAt = notification?.start_at ? Date.parse(notification.start_at) : null;
+  const endAt = notification?.end_at ? Date.parse(notification.end_at) : null;
+  const nowMs = now.getTime();
+
+  if (Number.isFinite(startAt) && startAt > nowMs) {
+    return false;
+  }
+
+  if (Number.isFinite(endAt) && endAt < nowMs) {
+    return false;
+  }
+
+  return true;
 }
+
+function normalizePopupNotificationLink(value = "") {
+  const candidate = normalizePublicText(value, 2000);
+
+  if (!candidate) {
+    return "";
+  }
+
+  if (candidate.startsWith("/")) {
+    return candidate;
+  }
+
+  try {
+    const parsedUrl = new URL(candidate);
+    return ["http:", "https:"].includes(parsedUrl.protocol) ? parsedUrl.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function mapPublicPopupNotification(notification = {}) {
+  return {
+    id: notification.id,
+    hotelSlug: normalizePublicText(notification.hotel_slug, 120),
+    title: normalizePublicText(notification.title, 160),
+    description: normalizePublicText(notification.description, 4000),
+    imageUrl: normalizePublicText(notification.image_url, 2000),
+    storagePath: normalizePublicText(notification.storage_path, 500),
+    ctaText: normalizePublicText(notification.cta_text, 120),
+    ctaLink: normalizePopupNotificationLink(notification.cta_link),
+    displayMode: normalizePublicText(notification.display_mode, 40).toLowerCase(),
+    startAt: normalizePublicText(notification.start_at, 80),
+    endAt: normalizePublicText(notification.end_at, 80),
+    priority: Number.isFinite(Number(notification.priority)) ? Number(notification.priority) : 0
+  };
+}
+
+function mapPublicOrderingSettings(settings = {}) {
+  const normalizedSettings =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : {};
+
+  return {
+    customerOrderingEnabled: normalizedSettings.customerOrderingEnabled !== false,
+    staffOrderingEnabled: normalizedSettings.staffOrderingEnabled !== false,
+    whatsappOrderingEnabled: normalizedSettings.whatsappOrderingEnabled !== false,
+    secureOnlinePaymentEnabled: normalizedSettings.secureOnlinePaymentEnabled !== false,
+    cashOnDeliveryEnabled: normalizedSettings.cashOnDeliveryEnabled !== false,
+    manualUpiPaymentEnabled: normalizedSettings.manualUpiPaymentEnabled !== false,
+    title: normalizePublicText(normalizedSettings.disabledTitle, 160),
+    message: normalizePublicText(normalizedSettings.disabledMessage, 1000),
+    buttonText: normalizePublicText(normalizedSettings.disabledButtonText, 120),
+    buttonLink: normalizePublicText(normalizedSettings.disabledButtonLink, 2000),
+    icon: normalizePublicText(normalizedSettings.disabledIcon, 40)
+  };
+}
+
 
 router.get("/hotel/:slug", async (req, res) => {
   try {
@@ -116,8 +214,16 @@ router.get("/hotel/:slug", async (req, res) => {
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 
     if (cachedPayload) {
+      const orderingSettings = await fetchHotelOrderingSettings(slug);
+      const refreshedPayload = {
+        ...cachedPayload,
+        hotel: {
+          ...cachedPayload.hotel,
+          ordering: mapPublicOrderingSettings(orderingSettings)
+        }
+      };
       res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
-      return res.json(cachedPayload);
+      return res.json(refreshedPayload);
     }
 
     const { data, error } = await supabase
@@ -135,9 +241,14 @@ router.get("/hotel/:slug", async (req, res) => {
       });
     }
 
+    const orderingSettings = await fetchHotelOrderingSettings(slug);
+
     const payload = {
       success: true,
-      hotel: data
+      hotel: {
+        ...data,
+        ordering: mapPublicOrderingSettings(orderingSettings)
+      }
     };
 
     setCachedPublicRoutePayload(cacheKey, payload);
@@ -161,6 +272,10 @@ router.get("/menu/:slug", async (req, res) => {
       return;
     }
 
+    if (!(await ensureHotelFeatureEnabled(res, { featureKey: "food", hotelSlug: slug }))) {
+      return;
+    }
+
     const cacheKey = `menu:${slug}`;
     const cachedPayload = getCachedPublicRoutePayload(cacheKey);
 
@@ -180,10 +295,29 @@ router.get("/menu/:slug", async (req, res) => {
 
     if (error) throw error;
 
+    let comboPresentationMap = new Map();
+
+    try {
+      comboPresentationMap = await fetchMenuComboPresentationMap({
+        hotelSlug: slug,
+        menuItems: data || []
+      });
+    } catch (comboError) {
+      if (!isMissingMenuComboSchemaError(comboError)) {
+        throw comboError;
+      }
+    }
+
     const groupedMenu = {};
 
     for (const item of data || []) {
       const category = item.category || "others";
+      const comboPresentation = comboPresentationMap.get(item.item_id);
+      const isComboItem = String(item.item_type || "single").trim() === "combo";
+
+      if (isComboItem && !isMenuComboPresentationCurrentlyAvailable(comboPresentation)) {
+        continue;
+      }
 
       if (!groupedMenu[category]) {
         groupedMenu[category] = [];
@@ -196,8 +330,16 @@ router.get("/menu/:slug", async (req, res) => {
         price: Number(item.price || 0),
         image: item.image || "",
         alt: item.alt || item.name || "",
-        badge: item.badge || "",
-        tag: item.tag || ""
+        badge: item.badge || (comboPresentation ? "Combo" : ""),
+        tag: item.tag || "",
+        itemType: comboPresentation?.itemType || item.item_type || "single",
+        comboItems: comboPresentation?.comboItems || [],
+        originalPrice: Number(comboPresentation?.originalPrice || 0),
+        savings: Number(comboPresentation?.savings || 0),
+        startDate: comboPresentation?.startDate || "",
+        endDate: comboPresentation?.endDate || "",
+        startTime: comboPresentation?.startTime || "",
+        endTime: comboPresentation?.endTime || ""
       });
     }
 
@@ -290,7 +432,10 @@ router.get("/testimonials/:slug", async (req, res) => {
     const { data, error } = await supabase
       .from("testimonials")
       .select(PUBLIC_TESTIMONIAL_FIELDS)
-      .eq("hotel_slug", slug);
+      .eq("hotel_slug", slug)
+      .eq("is_archived", false)
+      .eq("is_active", true)
+      .eq("is_approved", true);
 
     if (error) {
       if (isMissingTestimonialsRelationError(error)) {
@@ -313,7 +458,7 @@ router.get("/testimonials/:slug", async (req, res) => {
           item &&
           item.is_archived !== true &&
           item.is_active !== false &&
-          item.is_approved !== false
+          item.is_approved === true
       )
       .sort((left, right) => {
         const leftSort = Number.isFinite(Number(left?.sort_order)) ? Number(left.sort_order) : 0;
@@ -352,6 +497,72 @@ router.get("/testimonials/:slug", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch testimonials"
+    });
+  }
+});
+
+router.get("/popup-notification/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const hotelAccess = await ensurePublicHotelAccess(req, res, slug, {
+      notFoundMessage: "Hotel notification is not publicly available",
+      forbiddenMessage: "This hotel notification is not available for the current origin"
+    });
+
+    if (!hotelAccess) {
+      return;
+    }
+
+    const cacheKey = `popup-notification:${slug}`;
+    const cachedPayload = getCachedPublicRoutePayload(cacheKey);
+
+    if (cachedPayload) {
+      res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+      return res.json(cachedPayload);
+    }
+
+    const { data, error } = await supabase
+      .from("hotel_popup_notifications")
+      .select(PUBLIC_POPUP_NOTIFICATION_FIELDS)
+      .eq("hotel_slug", slug)
+      .eq("is_active", true)
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        const payload = {
+          success: true,
+          notifications: [],
+          notification: null
+        };
+
+        setCachedPublicRoutePayload(cacheKey, payload);
+        res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+        return res.json(payload);
+      }
+
+      throw error;
+    }
+
+    const activeNotifications = (data || [])
+      .filter((notification) => isPopupNotificationWithinActiveWindow(notification))
+      .map((notification) => mapPublicPopupNotification(notification));
+    const payload = {
+      success: true,
+      notifications: activeNotifications,
+      notification: activeNotifications[0] || null
+    };
+
+    setCachedPublicRoutePayload(cacheKey, payload);
+    res.set("Cache-Control", PUBLIC_ROUTE_CACHE_CONTROL);
+    res.json(payload);
+  } catch (error) {
+    console.error("Public popup notification fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch popup notification"
     });
   }
 });

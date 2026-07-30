@@ -60,6 +60,13 @@ function resetPageRuntimeConfig(filePath) {
     { required: false }
   );
 
+  nextSource = replaceMetaContent(
+    nextSource,
+    "app-room-combined-checkout-frontend-enabled",
+    "false",
+    { required: false }
+  );
+
   if (nextSource !== originalSource) {
     fs.writeFileSync(filePath, nextSource, "utf8");
     return true;

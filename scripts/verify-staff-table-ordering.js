@@ -70,17 +70,17 @@ function main() {
   const routeChecks = [
     {
       label: "staff menu route",
-      pattern: /router\.get\(\s*"\/menu",\s*requireStaffAuth,\s*async\s*\(req,\s*res\)\s*=>/m
+      pattern: /router\.get\(\s*"\/menu",\s*requireStaffAuth,\s*requireStaffFoodModule,\s*async\s*\(req,\s*res\)\s*=>/m
     },
     {
       label: "staff create order route",
       pattern:
-        /router\.post\(\s*"\/orders",\s*requireStaffAuth,\s*validateBody\(staffTableOrderSchema\),\s*async\s*\(req,\s*res\)\s*=>/m
+        /router\.post\(\s*"\/orders",\s*requireStaffAuth,\s*requireStaffFoodModule,\s*validateBody\(staffTableOrderSchema\),\s*async\s*\(req,\s*res\)\s*=>/m
     },
     {
       label: "staff order validated body usage",
       pattern:
-        /const\s+tableNumber\s*=\s*normalizeStaffText\(req\.validatedBody\.tableNumber,\s*80\);[\s\S]*const\s+items\s*=\s*req\.validatedBody\.items\s*\|\|\s*\[\];/m
+        /const\s+tableResolution\s*=\s*await\s+resolveTableForOrder\([\s\S]*req\.validatedBody\.tableNumber[\s\S]*const\s+tableNumber\s*=\s*tableResolution\.tableNumber;[\s\S]*const\s+items\s*=\s*req\.validatedBody\.items\s*\|\|\s*\[\];/m
     },
     {
       label: "staff order source",
@@ -134,7 +134,7 @@ function main() {
   const htmlChecks = [
     {
       label: "take order tab",
-      pattern: /data-staff-view="table-order"[^>]*>Take Order</m
+      pattern: /data-staff-view="table-order"[^>]*>[\s\S]*?<span class="staff-sidebar-nav-label">Take Order<\/span>[\s\S]*?<\/button>/m
     },
     {
       label: "table order panel",
@@ -188,7 +188,7 @@ function main() {
     },
     {
       label: "table order menu filters renderer",
-      pattern: /function renderStaffTableOrderMenuFilters\(\)/m
+      pattern: /function renderStaffTableOrderMenuFilters\(\{\s*visibleCount = null\s*\} = \{\}\)/m
     },
     {
       label: "table order filtered items helper",
@@ -203,8 +203,8 @@ function main() {
       pattern: /staffFetchJson\(`\$\{STAFF_API_BASE\}\/orders`,\s*\{/m
     },
     {
-      label: "lazy load table order view",
-      pattern: /if\s*\(nextView === "table-order" && !STAFF_STATE\.tableOrderMenuLoaded\)\s*\{\s*void loadStaffTableOrderMenu\(\);\s*\}/m
+      label: "lazy load Create New Order view",
+      pattern: /if\s*\(nextView === "create"\)\s*\{[\s\S]*?if\s*\(!STAFF_STATE\.tableOrderMenuLoaded\)\s*\{[\s\S]*?void loadStaffTableOrderMenu\(\);[\s\S]*?\}/m
     },
     {
       label: "staff table order source grouping",
@@ -216,7 +216,7 @@ function main() {
     },
     {
       label: "table order category binding",
-      pattern: /tableOrderCategoryFilter\.addEventListener\("change",\s*\(\)\s*=>\s*\{[\s\S]*renderStaffTableOrderMenu\(\);/m
+      pattern: /tableOrderCategoryFilter\.addEventListener\("change",\s*\(\)\s*=>\s*\{[\s\S]*setStaffTableOrderMenuCategory\(/m
     },
     {
       label: "staff taken by label",

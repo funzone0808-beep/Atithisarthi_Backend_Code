@@ -293,6 +293,62 @@ function checkPaymentEnv(issues, warnings) {
   }
 }
 
+function checkRoomCombinedCheckoutEnv(issues, warnings) {
+  const rawBackendValue = String(
+    getEnv("ROOM_COMBINED_CHECKOUT_ENABLED", "")
+  ).trim().toLowerCase();
+  const rawFrontendValue = String(
+    getEnv("APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED", "false")
+  ).trim().toLowerCase();
+
+  if (rawBackendValue && !isExplicitBooleanText(rawBackendValue)) {
+    addIssue(
+      issues,
+      "ROOM_COMBINED_CHECKOUT_ENABLED must be true or false when provided."
+    );
+  }
+
+  if (!isExplicitBooleanText(rawFrontendValue)) {
+    addIssue(
+      issues,
+      "APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED must be true or false for production."
+    );
+  }
+
+  if (rawFrontendValue === "true" && rawBackendValue !== "true") {
+    addIssue(
+      issues,
+      "APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED cannot be true unless ROOM_COMBINED_CHECKOUT_ENABLED is also true."
+    );
+  }
+
+  if (rawBackendValue !== "true") {
+    addWarning(
+      warnings,
+      "ROOM_COMBINED_CHECKOUT_ENABLED is false or missing. Atomic combined checkout will stay disabled."
+    );
+    return;
+  }
+
+  addWarning(
+    warnings,
+    "ROOM_COMBINED_CHECKOUT_ENABLED is true. Confirm the atomic checkout migration and staging verifier passed before mounting checkout routes."
+  );
+
+  if (rawFrontendValue !== "true") {
+    addWarning(
+      warnings,
+      "APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED is false. Admin/staff combined checkout buttons will remain disabled."
+    );
+    return;
+  }
+
+  addWarning(
+    warnings,
+    "APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED is true. Confirm production enablement was separately approved after staging checkout verification."
+  );
+}
+
 function checkNotificationEnv(issues, warnings) {
   if (!getBooleanEnv("NOTIFICATION_DELIVERY_ENABLED")) {
     addWarning(warnings, "NOTIFICATION_DELIVERY_ENABLED is false. Email notifications will be skipped.");
@@ -575,8 +631,14 @@ function run() {
   console.log(
     `APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT: ${getEnv("APP_OPEN_WHATSAPP_AFTER_VERIFIED_ONLINE_PAYMENT", "missing")}`
   );
+  console.log(
+    `APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED: ${getEnv("APP_ROOM_COMBINED_CHECKOUT_FRONTEND_ENABLED", "false")}`
+  );
   console.log(`SUPABASE_URL: ${getEnv("SUPABASE_URL", "missing")}`);
   console.log(`PAYMENT_GATEWAY_ENABLED: ${getEnv("PAYMENT_GATEWAY_ENABLED", "false")}`);
+  console.log(
+    `ROOM_COMBINED_CHECKOUT_ENABLED: ${getEnv("ROOM_COMBINED_CHECKOUT_ENABLED", "false")}`
+  );
   console.log(`RAZORPAY_KEY_ID: ${maskValue(getEnv("RAZORPAY_KEY_ID"))}`);
   console.log("");
 
@@ -586,6 +648,7 @@ function run() {
 
   checkRequiredProductionEnv(issues);
   checkFrontendRuntimeEnv(issues);
+  checkRoomCombinedCheckoutEnv(issues, warnings);
   checkPaymentEnv(issues, warnings);
   checkNotificationEnv(issues, warnings);
   checkFrontendConfig(issues, warnings);

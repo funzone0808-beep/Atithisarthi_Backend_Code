@@ -1,6 +1,7 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
 const { requireAdminAuth } = require("../middleware/require-admin-auth");
+const { requireHotelFeature, resolveAdminHotelSlug } = require("../middleware/require-hotel-feature");
 const {
   processNotificationEventDeliverySafely
 } = require("../utils/notifications");
@@ -14,16 +15,37 @@ const { validateBody } = require("../validators/common");
 const {
   galleryItemSchema,
   hotelSchema,
+  hotelDomainSettingsSchema,
+  hotelOrderingSettingsSchema,
   hotelPaymentRouteSettingsSchema,
   hotelNotificationSettingsSchema,
+  popupNotificationSchema,
+  partialPopupNotificationSchema,
   qrLinkSignatureSchema,
   menuItemSchema,
+  comboMenuItemSchema,
+  partialComboMenuItemSchema,
+  partialHotelSchema,
   partialGalleryItemSchema,
   hotelProfileSchema,
   testimonialSchema,
   partialTestimonialSchema
 } = require("../validators/admin");
 const { buildQrContextToken } = require("../utils/qr-context");
+const {
+  findHotelDomainConflict,
+  validateHotelDomainSettings
+} = require("../utils/hotel-domain-settings");
+const {
+  getTrustedPublicSubdomainParentHosts,
+  normalizePublicHostname,
+  normalizePublicText
+} = require("../utils/public-hotel-access");
+const {
+  buildHotelOrderingSettings,
+  invalidateHotelOrderingSettings,
+  isMissingHotelOrderingSettingsTableError
+} = require("../utils/hotel-ordering-settings");
 
 const NOTIFICATION_EVENT_SOURCE_TYPES = [
   "order",
@@ -42,6 +64,41 @@ const CONTACT_SUBMISSION_STATUSES = ["new", "contacted", "resolved", "closed", "
 const ORDER_BILLING_STATUSES = ["not_billed", "billed", "cancelled"];
 const ORDER_PAYMENT_STATUSES = ["unpaid", "customer_confirmed", "paid", "refunded"];
 
+async function resolveAdminFoodOperationHotelSlug(req = {}) {
+  const directHotelSlug = resolveAdminHotelSlug(req);
+  if (directHotelSlug) return directHotelSlug;
+
+  const recordId = String(req.params?.id || "").trim();
+  const pathName = String(req.path || "").trim();
+  if (!recordId) return "";
+
+  const table = pathName.startsWith("/orders/")
+    ? "orders"
+    : pathName.startsWith("/reservations/")
+      ? "reservations"
+      : pathName.startsWith("/menu-items/") || pathName.startsWith("/menu-combos/")
+        ? "menu_items"
+        : "";
+  if (!table) return "";
+
+  let query = supabase.from(table).select("hotel_slug");
+  query = query.eq("id", recordId);
+  const { data, error } = await query.maybeSingle();
+  if (error) throw error;
+  return String(data?.hotel_slug || "").trim();
+}
+
+const requireAdminFoodModule = requireHotelFeature("food", {
+  resolveHotelSlug: resolveAdminFoodOperationHotelSlug
+});
+const LEGACY_OPTIONAL_GALLERY_COLUMNS = [
+  "storage_path",
+  "layout_variant",
+  "is_active",
+  "is_archived",
+  "updated_at"
+];
+
 function isMissingTestimonialsRelationError(error) {
   const code = String(error?.code || "").trim().toUpperCase();
   const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
@@ -52,6 +109,22 @@ function isMissingTestimonialsRelationError(error) {
     code === "42P01" ||
     code === "PGRST205" ||
     (details.includes("testimonial") &&
+      (details.includes("relation") ||
+        details.includes("schema cache") ||
+        details.includes("could not find")))
+  );
+}
+
+function isMissingPopupNotificationsRelationError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    (details.includes("hotel_popup_notifications") &&
       (details.includes("relation") ||
         details.includes("schema cache") ||
         details.includes("could not find")))
@@ -71,6 +144,36 @@ function isMissingContactSubmissionsRelationError(error) {
       (details.includes("relation") ||
         details.includes("schema cache") ||
         details.includes("could not find")))
+  );
+}
+
+function isMissingMenuComboSchemaError(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+
+  return (
+    code === "42P01" ||
+    code === "42703" ||
+    code === "PGRST205" ||
+    code === "PGRST204" ||
+    details.includes("menu_combo_items") ||
+    details.includes("menu_combo_settings") ||
+    details.includes("item_type")
+  );
+}
+
+function isMenuItemsIdSequenceConflict(error) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const message = String(error?.message || "").trim().toLowerCase();
+  const details = `${error?.details || ""} ${error?.hint || ""}`.trim().toLowerCase();
+
+  return (
+    code === "23505" &&
+    (message.includes("menu_items_pkey") ||
+      details.includes("menu_items_pkey") ||
+      details.includes("key (id)="))
   );
 }
 
@@ -111,6 +214,91 @@ function normalizeBillNumberPart(value, fallback = "ORDER", maxLength = 18) {
     .replace(/^-+|-+$/g, "");
 
   return (normalizedValue || fallback).slice(0, maxLength);
+}
+
+function getGallerySchemaErrorDetails(error) {
+  return `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`
+    .trim()
+    .toLowerCase();
+}
+
+function getMissingLegacyGalleryColumn(error, payload = {}) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const details = getGallerySchemaErrorDetails(error);
+  const looksLikeMissingColumnError =
+    code === "42703" ||
+    code === "PGRST204" ||
+    (details.includes("column") &&
+      (details.includes("does not exist") ||
+        details.includes("schema cache") ||
+        details.includes("could not find")));
+
+  if (!looksLikeMissingColumnError) {
+    return "";
+  }
+
+  return (
+    LEGACY_OPTIONAL_GALLERY_COLUMNS.find(
+      (columnName) => payload[columnName] !== undefined && details.includes(columnName)
+    ) || ""
+  );
+}
+
+async function insertGalleryItemWithCompatibility(insertPayload = {}) {
+  const compatiblePayload = { ...insertPayload };
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= LEGACY_OPTIONAL_GALLERY_COLUMNS.length; attempt += 1) {
+    const { data, error } = await supabase
+      .from("gallery_items")
+      .insert([compatiblePayload])
+      .select()
+      .single();
+
+    if (!error) {
+      return { data, error: null };
+    }
+
+    lastError = error;
+    const missingColumn = getMissingLegacyGalleryColumn(error, compatiblePayload);
+
+    if (!missingColumn) {
+      return { data: null, error };
+    }
+
+    delete compatiblePayload[missingColumn];
+  }
+
+  return { data: null, error: lastError };
+}
+
+async function updateGalleryItemWithCompatibility(id, updatePayload = {}) {
+  const compatiblePayload = { ...updatePayload };
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= LEGACY_OPTIONAL_GALLERY_COLUMNS.length; attempt += 1) {
+    const { data, error } = await supabase
+      .from("gallery_items")
+      .update(compatiblePayload)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (!error) {
+      return { data, error: null };
+    }
+
+    lastError = error;
+    const missingColumn = getMissingLegacyGalleryColumn(error, compatiblePayload);
+
+    if (!missingColumn) {
+      return { data: null, error };
+    }
+
+    delete compatiblePayload[missingColumn];
+  }
+
+  return { data: null, error: lastError };
 }
 
 function buildOrderBillNumber(order = {}, billedAt = new Date().toISOString()) {
@@ -249,9 +437,467 @@ function buildPaymentRouteSettingsResponse(settingsRow, hotelSlug = "") {
   };
 }
 
+function buildOrderingSettingsResponse(settingsRow, hotelSlug = "", options = {}) {
+  const settings = buildHotelOrderingSettings(settingsRow, hotelSlug, options);
+
+  return {
+    hotelSlug: settings.hotelSlug,
+    customerOrderingEnabled: settings.customerOrderingEnabled,
+    staffOrderingEnabled: settings.staffOrderingEnabled,
+    whatsappOrderingEnabled: settings.whatsappOrderingEnabled,
+    secureOnlinePaymentEnabled: settings.secureOnlinePaymentEnabled,
+    cashOnDeliveryEnabled: settings.cashOnDeliveryEnabled,
+    manualUpiPaymentEnabled: settings.manualUpiPaymentEnabled,
+    disabledTitle: settings.disabledTitle,
+    disabledMessage: settings.disabledMessage,
+    disabledButtonText: settings.disabledButtonText,
+    disabledButtonLink: settings.disabledButtonLink,
+    disabledIcon: settings.disabledIcon
+  };
+}
+
+function normalizeAdminPopupLink(value = "") {
+  const candidate = normalizePublicText(value, 2000);
+
+  if (!candidate) {
+    return "";
+  }
+
+  if (candidate.startsWith("/")) {
+    return candidate;
+  }
+
+  try {
+    const parsedUrl = new URL(candidate);
+    return ["http:", "https:"].includes(parsedUrl.protocol) ? parsedUrl.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizePopupTimestamp(value = "") {
+  const candidate = normalizePublicText(value, 80);
+  return candidate || null;
+}
+
+function normalizeComboDateValue(value = "") {
+  const candidate = normalizePublicText(value, 20);
+  return candidate || null;
+}
+
+function normalizeComboTimeValue(value = "") {
+  const candidate = normalizePublicText(value, 10);
+  return candidate || null;
+}
+
+function getMenuComboLookupKey(hotelSlug = "", itemId = "") {
+  return `${String(hotelSlug || "").trim()}::${String(itemId || "").trim()}`;
+}
+
+function createHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = Number(statusCode || 500);
+  return error;
+}
+
+function buildAdminMenuComboResponse(
+  menuItemRow = {},
+  comboChildRows = [],
+  comboSettingsRow = null,
+  childMenuItemMap = new Map()
+) {
+  const childItems = (Array.isArray(comboChildRows) ? comboChildRows : []).map((comboChildRow) => {
+    const childMenuItem = childMenuItemMap.get(
+      getMenuComboLookupKey(comboChildRow.hotel_slug, comboChildRow.child_item_id)
+    );
+
+    return {
+      childItemId: comboChildRow.child_item_id || "",
+      quantity: Number(comboChildRow.quantity || 1),
+      sortOrder: Number(comboChildRow.sort_order || 0),
+      childName: childMenuItem?.name || "",
+      childPrice: Number(childMenuItem?.price || 0),
+      childCategory: childMenuItem?.category || "",
+      childImage: childMenuItem?.image || "",
+      childIsAvailable: childMenuItem?.is_available !== false
+    };
+  });
+
+  const originalPrice = childItems.reduce(
+    (total, childItem) => total + Number(childItem.childPrice || 0) * Number(childItem.quantity || 0),
+    0
+  );
+  const comboPrice = Number(menuItemRow.price || 0);
+
+  return {
+    id: menuItemRow.id,
+    hotelSlug: menuItemRow.hotel_slug || "",
+    category: menuItemRow.category || "",
+    itemId: menuItemRow.item_id || "",
+    itemType: menuItemRow.item_type || "combo",
+    name: menuItemRow.name || "",
+    description: menuItemRow.description || "",
+    price: comboPrice,
+    originalPrice,
+    savings: Math.max(0, originalPrice - comboPrice),
+    image: menuItemRow.image || "",
+    alt: menuItemRow.alt || menuItemRow.name || "",
+    badge: menuItemRow.badge || "",
+    tag: menuItemRow.tag || "",
+    isAvailable: menuItemRow.is_available !== false,
+    isArchived: menuItemRow.is_archived === true,
+    sortOrder: Number(menuItemRow.sort_order || 0),
+    startDate: comboSettingsRow?.start_date || "",
+    endDate: comboSettingsRow?.end_date || "",
+    startTime: comboSettingsRow?.start_time || "",
+    endTime: comboSettingsRow?.end_time || "",
+    childItems,
+    createdAt: menuItemRow.created_at || "",
+    updatedAt: menuItemRow.updated_at || ""
+  };
+}
+
+async function fetchValidatedComboChildMenuItems({ hotelSlug, childItems = [] }) {
+  const normalizedHotelSlug = normalizePublicText(hotelSlug, 120);
+  const normalizedChildItems = Array.isArray(childItems)
+    ? childItems.map((childItem) => ({
+        childItemId: normalizePublicText(childItem?.childItemId || "", 120),
+        quantity: Number(childItem?.quantity || 1),
+        sortOrder: Number(childItem?.sortOrder || 0)
+      }))
+    : [];
+
+  if (!normalizedHotelSlug) {
+    throw createHttpError(400, "Hotel slug is required");
+  }
+
+  if (!normalizedChildItems.length) {
+    throw createHttpError(400, "At least one child menu item is required");
+  }
+
+  const childItemIds = [...new Set(normalizedChildItems.map((childItem) => childItem.childItemId))];
+  const { data, error } = await supabase
+    .from("menu_items")
+    .select("hotel_slug,item_id,name,price,category,image,item_type,is_available,is_archived")
+    .eq("hotel_slug", normalizedHotelSlug)
+    .in("item_id", childItemIds);
+
+  if (error) {
+    throw error;
+  }
+
+  const menuItemsById = new Map((data || []).map((menuItem) => [menuItem.item_id, menuItem]));
+
+  for (const childItem of normalizedChildItems) {
+    const matchedMenuItem = menuItemsById.get(childItem.childItemId);
+
+    if (!matchedMenuItem) {
+      throw createHttpError(
+        400,
+        `Child menu item "${childItem.childItemId}" was not found in hotel "${normalizedHotelSlug}"`
+      );
+    }
+
+    if (matchedMenuItem.is_archived === true) {
+      throw createHttpError(
+        400,
+        `Child menu item "${childItem.childItemId}" is archived and cannot be used in a combo`
+      );
+    }
+
+    if ((matchedMenuItem.item_type || "single") === "combo") {
+      throw createHttpError(
+        400,
+        `Nested combos are not supported yet. "${childItem.childItemId}" is already a combo item`
+      );
+    }
+  }
+
+  return normalizedChildItems;
+}
+
+async function replaceMenuComboChildren({ hotelSlug, comboItemId, childItems = [] }) {
+  const normalizedHotelSlug = normalizePublicText(hotelSlug, 120);
+  const normalizedComboItemId = normalizePublicText(comboItemId, 120);
+
+  const deleteResponse = await supabase
+    .from("menu_combo_items")
+    .delete()
+    .eq("hotel_slug", normalizedHotelSlug)
+    .eq("combo_item_id", normalizedComboItemId);
+
+  if (deleteResponse.error) {
+    throw deleteResponse.error;
+  }
+
+  const normalizedChildItems = await fetchValidatedComboChildMenuItems({
+    hotelSlug: normalizedHotelSlug,
+    childItems
+  });
+
+  const { error } = await supabase.from("menu_combo_items").insert(
+    normalizedChildItems.map((childItem) => ({
+      hotel_slug: normalizedHotelSlug,
+      combo_item_id: normalizedComboItemId,
+      child_item_id: childItem.childItemId,
+      quantity: Number(childItem.quantity || 1),
+      sort_order: Number(childItem.sortOrder || 0),
+      updated_at: new Date().toISOString()
+    }))
+  );
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function syncMenuComboSettings({
+  hotelSlug,
+  comboItemId,
+  startDate,
+  endDate,
+  startTime,
+  endTime
+}) {
+  const normalizedHotelSlug = normalizePublicText(hotelSlug, 120);
+  const normalizedComboItemId = normalizePublicText(comboItemId, 120);
+  const normalizedSettingsPayload = {
+    hotel_slug: normalizedHotelSlug,
+    combo_item_id: normalizedComboItemId,
+    start_date: normalizeComboDateValue(startDate),
+    end_date: normalizeComboDateValue(endDate),
+    start_time: normalizeComboTimeValue(startTime),
+    end_time: normalizeComboTimeValue(endTime),
+    updated_at: new Date().toISOString()
+  };
+  const hasActiveWindow = [
+    normalizedSettingsPayload.start_date,
+    normalizedSettingsPayload.end_date,
+    normalizedSettingsPayload.start_time,
+    normalizedSettingsPayload.end_time
+  ].some(Boolean);
+
+  if (!hasActiveWindow) {
+    const { error } = await supabase
+      .from("menu_combo_settings")
+      .delete()
+      .eq("hotel_slug", normalizedHotelSlug)
+      .eq("combo_item_id", normalizedComboItemId);
+
+    if (error) {
+      throw error;
+    }
+
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("menu_combo_settings")
+    .upsert([normalizedSettingsPayload], { onConflict: "hotel_slug,combo_item_id" })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+async function getAdminMenuComboByDbId(id) {
+  const { data: comboRow, error: comboError } = await supabase
+    .from("menu_items")
+    .select("*")
+    .eq("id", id)
+    .eq("item_type", "combo")
+    .maybeSingle();
+
+  if (comboError) {
+    throw comboError;
+  }
+
+  if (!comboRow) {
+    return null;
+  }
+
+  const comboLookupKey = getMenuComboLookupKey(comboRow.hotel_slug, comboRow.item_id);
+  const { data: comboChildRows, error: comboChildrenError } = await supabase
+    .from("menu_combo_items")
+    .select("*")
+    .eq("hotel_slug", comboRow.hotel_slug)
+    .eq("combo_item_id", comboRow.item_id)
+    .order("sort_order", { ascending: true })
+    .order("id", { ascending: true });
+
+  if (comboChildrenError) {
+    throw comboChildrenError;
+  }
+
+  const { data: comboSettingsRow, error: comboSettingsError } = await supabase
+    .from("menu_combo_settings")
+    .select("*")
+    .eq("hotel_slug", comboRow.hotel_slug)
+    .eq("combo_item_id", comboRow.item_id)
+    .maybeSingle();
+
+  if (comboSettingsError) {
+    throw comboSettingsError;
+  }
+
+  const childItemIds = [...new Set((comboChildRows || []).map((comboChildRow) => comboChildRow.child_item_id))];
+  let childMenuItemMap = new Map();
+
+  if (childItemIds.length) {
+    const { data: childMenuItems, error: childMenuItemsError } = await supabase
+      .from("menu_items")
+      .select("hotel_slug,item_id,name,price,category,image,is_available")
+      .eq("hotel_slug", comboRow.hotel_slug)
+      .in("item_id", childItemIds);
+
+    if (childMenuItemsError) {
+      throw childMenuItemsError;
+    }
+
+    childMenuItemMap = new Map(
+      (childMenuItems || []).map((childMenuItem) => [
+        getMenuComboLookupKey(childMenuItem.hotel_slug, childMenuItem.item_id),
+        childMenuItem
+      ])
+    );
+  }
+
+  return buildAdminMenuComboResponse(
+    comboRow,
+    comboChildRows || [],
+    comboSettingsRow,
+    childMenuItemMap
+  );
+}
+
+function buildHotelLaunchReadinessResponse(hotelRow = {}) {
+  const hotelId = String(hotelRow?.id || "").trim();
+  const hotelSlug = normalizePublicText(hotelRow?.slug || "", 120).toLowerCase();
+  const hotelName = normalizePublicText(hotelRow?.name || "", 160);
+  const primaryDomain = normalizePublicHostname(hotelRow?.primary_domain || "");
+  const subdomain = normalizePublicText(hotelRow?.subdomain || "", 120).toLowerCase();
+  const trustedParentHosts = getTrustedPublicSubdomainParentHosts();
+  const recommendedSharedSubdomainHost =
+    subdomain && trustedParentHosts.length
+      ? `${subdomain}.${trustedParentHosts[0]}`
+      : "";
+  const isActive = hotelRow?.is_active === true;
+  const hasRoutingTarget = !!(primaryDomain || subdomain);
+  const exactPrimaryReady = !!(hotelSlug && primaryDomain && isActive);
+  const sharedSubdomainReady = !!(
+    hotelSlug &&
+    subdomain &&
+    trustedParentHosts.length &&
+    isActive
+  );
+  const warnings = [];
+
+  if (!hotelSlug) {
+    warnings.push("Hotel slug is missing.");
+  }
+
+  if (!isActive) {
+    warnings.push("Hotel is inactive, so public tenant routing should stay unavailable.");
+  }
+
+  if (!hasRoutingTarget) {
+    warnings.push("No primary domain or subdomain is saved yet.");
+  }
+
+  if (subdomain && !trustedParentHosts.length) {
+    warnings.push(
+      "Subdomain is saved, but FRONTEND_URL / FRONTEND_ORIGINS do not currently expose a trusted shared public parent host."
+    );
+  }
+
+  return {
+    hotelId,
+    hotelSlug,
+    hotelName,
+    isActive,
+    saved: {
+      primaryDomain,
+      subdomain
+    },
+    trustedSharedParentHosts: trustedParentHosts,
+    resolveTargets: {
+      primaryDomainHost: primaryDomain,
+      recommendedSharedSubdomainHost
+    },
+    checks: {
+      hasHotelSlug: !!hotelSlug,
+      hasPrimaryDomain: !!primaryDomain,
+      hasSubdomain: !!subdomain,
+      sharedSubdomainHostConfigured: trustedParentHosts.length > 0,
+      hasRoutingTarget,
+      exactPrimaryReady,
+      sharedSubdomainReady
+    },
+    warnings
+  };
+}
+
+async function applyValidatedHotelDomainSettings({
+  hotelId = "",
+  primaryDomain = undefined,
+  subdomain = undefined,
+  updatePayload = {}
+} = {}) {
+  if (primaryDomain === undefined && subdomain === undefined) {
+    return {
+      ok: true,
+      updatePayload
+    };
+  }
+
+  const validation = validateHotelDomainSettings({
+    primaryDomain,
+    subdomain
+  });
+
+  if (!validation.ok) {
+    return {
+      ok: false,
+      status: 400,
+      message: validation.message
+    };
+  }
+
+  const conflict = await findHotelDomainConflict(supabase, {
+    hotelId,
+    primaryDomain: validation.values.primaryDomain,
+    subdomain: validation.values.subdomain
+  });
+
+  if (conflict) {
+    return {
+      ok: false,
+      status: 409,
+      message: conflict.message
+    };
+  }
+
+  if (validation.values.primaryDomain !== undefined) {
+    updatePayload.primary_domain = validation.values.primaryDomain;
+  }
+
+  if (validation.values.subdomain !== undefined) {
+    updatePayload.subdomain = validation.values.subdomain;
+  }
+
+  return {
+    ok: true,
+    updatePayload
+  };
+}
+
 router.use(requireAdminAuth);
 
-router.post("/qr-links/sign", validateBody(qrLinkSignatureSchema), async (req, res) => {
+router.post("/qr-links/sign", validateBody(qrLinkSignatureSchema), requireAdminFoodModule, async (req, res) => {
   try {
     const {
       hotelSlug,
@@ -289,14 +935,16 @@ router.post("/qr-links/sign", validateBody(qrLinkSignatureSchema), async (req, r
    ───────────────────────────────────────────── */
 router.get("/orders", async (req, res) => {
   try {
-    const { hotelName } = req.query;
+    const { hotelName, hotelSlug } = req.query;
 
     let query = supabase
       .from("orders")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (hotelName) {
+    if (hotelSlug) {
+      query = query.eq("hotel_slug", hotelSlug);
+    } else if (hotelName) {
       query = query.eq("hotel_name", hotelName);
     }
 
@@ -362,14 +1010,16 @@ router.get("/inquiries", async (req, res) => {
    ───────────────────────────────────────────── */
 router.get("/reservations", async (req, res) => {
   try {
-    const { hotelName } = req.query;
+    const { hotelName, hotelSlug } = req.query;
 
     let query = supabase
       .from("reservations")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (hotelName) {
+    if (hotelSlug) {
+      query = query.eq("hotel_slug", hotelSlug);
+    } else if (hotelName) {
       query = query.eq("hotel_name", hotelName);
     }
 
@@ -671,6 +1321,52 @@ router.get("/payment-route-settings/:slug", async (req, res) => {
   }
 });
 
+router.get("/ordering-settings/:slug", async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim();
+
+    if (!slug) {
+      return res.status(400).json({
+        success: false,
+        message: "Hotel slug is required"
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("hotel_ordering_settings")
+      .select("*")
+      .eq("hotel_slug", slug)
+      .maybeSingle();
+
+    if (error) {
+      if (isMissingHotelOrderingSettingsTableError(error)) {
+        return res.json({
+          success: true,
+          schemaReady: false,
+          message: "Ordering settings table is not initialized yet",
+          settings: buildOrderingSettingsResponse(null, slug, {
+            schemaReady: false
+          })
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      schemaReady: true,
+      settings: buildOrderingSettingsResponse(data, slug)
+    });
+  } catch (error) {
+    console.error("Ordering settings fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch ordering settings"
+    });
+  }
+});
+
 
 router.get("/hotels", async (req, res) => {
   try {
@@ -696,7 +1392,7 @@ router.get("/hotels", async (req, res) => {
 });
 
 
-router.patch("/orders/:id/status", async (req, res) => {
+router.patch("/orders/:id/status", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const status = getAllowedStatus(req.body?.status, ORDER_STATUSES);
@@ -707,10 +1403,21 @@ router.patch("/orders/:id/status", async (req, res) => {
         message: `Status must be one of: ${ORDER_STATUSES.join(", ")}`
       });
     }
+    const lifecycleUpdate = {
+      status,
+      kitchen_status: {
+        new: "new",
+        confirmed: "accepted",
+        preparing: "preparing",
+        completed: "served",
+        cancelled: "cancelled"
+      }[status]
+    };
+
 
     const { data, error } = await supabase
       .from("orders")
-      .update({ status })
+      .update(lifecycleUpdate)
       .eq("id", id)
       .select()
       .single();
@@ -731,7 +1438,46 @@ router.patch("/orders/:id/status", async (req, res) => {
   }
 });
 
-router.patch("/orders/:id/billing", async (req, res) => {
+router.get("/hotels/:id/launch-readiness", async (req, res) => {
+  try {
+    const hotelId = String(req.params.id || "").trim();
+
+    if (!hotelId) {
+      return res.status(400).json({
+        success: false,
+        message: "Hotel id is required"
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("hotels")
+      .select("id,slug,name,primary_domain,subdomain,is_active")
+      .eq("id", hotelId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "Hotel not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      readiness: buildHotelLaunchReadinessResponse(data)
+    });
+  } catch (error) {
+    console.error("Hotel launch readiness fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch hotel launch readiness"
+    });
+  }
+});
+
+router.patch("/orders/:id/billing", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const { updatePayload, error: validationError } = buildOrderBillingUpdatePayload(req.body);
@@ -843,7 +1589,7 @@ router.patch("/inquiries/:id/status", async (req, res) => {
   }
 });
 
-router.patch("/reservations/:id/status", async (req, res) => {
+router.patch("/reservations/:id/status", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const status = getAllowedStatus(req.body?.status, RESERVATION_STATUSES);
@@ -878,23 +1624,35 @@ router.patch("/reservations/:id/status", async (req, res) => {
   }
 });
 
-router.patch("/hotels/:id/domain", async (req, res) => {
+router.patch("/hotels/:id/domain", validateBody(hotelDomainSettingsSchema), async (req, res) => {
   try {
     const { id } = req.params;
-    const { primaryDomain, subdomain, isActive } = req.body;
+    const { primaryDomain, subdomain, isActive } = req.validatedBody;
 
     const updatePayload = {};
+    const domainSettingsResult = await applyValidatedHotelDomainSettings({
+      hotelId: id,
+      primaryDomain,
+      subdomain,
+      updatePayload
+    });
 
-    if (primaryDomain !== undefined) {
-      updatePayload.primary_domain = primaryDomain || null;
-    }
-
-    if (subdomain !== undefined) {
-      updatePayload.subdomain = subdomain || null;
+    if (!domainSettingsResult.ok) {
+      return res.status(domainSettingsResult.status).json({
+        success: false,
+        message: domainSettingsResult.message
+      });
     }
 
     if (isActive !== undefined) {
       updatePayload.is_active = !!isActive;
+    }
+
+    if (!Object.keys(updatePayload).length) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one domain setting is required"
+      });
     }
 
     const { data, error } = await supabase
@@ -932,21 +1690,30 @@ router.post("/hotels", validateBody(hotelSchema), async (req, res) => {
       subdomain,
       isActive
     } = req.validatedBody;
+    const insertPayload = {
+      slug,
+      name,
+      whatsapp_number: whatsappNumber || null,
+      upi_id: upiId || null,
+      gst_percent: gstPercent ?? 5,
+      is_active: isActive !== undefined ? !!isActive : true
+    };
+    const domainSettingsResult = await applyValidatedHotelDomainSettings({
+      primaryDomain,
+      subdomain,
+      updatePayload: insertPayload
+    });
+
+    if (!domainSettingsResult.ok) {
+      return res.status(domainSettingsResult.status).json({
+        success: false,
+        message: domainSettingsResult.message
+      });
+    }
 
     const { data, error } = await supabase
       .from("hotels")
-      .insert([
-        {
-          slug,
-          name,
-          whatsapp_number: whatsappNumber || null,
-          upi_id: upiId || null,
-          gst_percent: gstPercent ?? 5,
-          primary_domain: primaryDomain || null,
-          subdomain: subdomain || null,
-          is_active: isActive !== undefined ? !!isActive : true
-        }
-      ])
+      .insert([domainSettingsResult.updatePayload])
       .select()
       .single();
 
@@ -966,7 +1733,7 @@ router.post("/hotels", validateBody(hotelSchema), async (req, res) => {
   }
 });
 
-router.patch("/hotels/:id", async (req, res) => {
+router.patch("/hotels/:id", validateBody(partialHotelSchema), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -978,7 +1745,7 @@ router.patch("/hotels/:id", async (req, res) => {
       primaryDomain,
       subdomain,
       isActive
-    } = req.body;
+    } = req.validatedBody;
 
     const updatePayload = {};
 
@@ -987,9 +1754,28 @@ router.patch("/hotels/:id", async (req, res) => {
     if (whatsappNumber !== undefined) updatePayload.whatsapp_number = whatsappNumber || null;
     if (upiId !== undefined) updatePayload.upi_id = upiId || null;
     if (gstPercent !== undefined) updatePayload.gst_percent = gstPercent;
-    if (primaryDomain !== undefined) updatePayload.primary_domain = primaryDomain || null;
-    if (subdomain !== undefined) updatePayload.subdomain = subdomain || null;
+    const domainSettingsResult = await applyValidatedHotelDomainSettings({
+      hotelId: id,
+      primaryDomain,
+      subdomain,
+      updatePayload
+    });
+
+    if (!domainSettingsResult.ok) {
+      return res.status(domainSettingsResult.status).json({
+        success: false,
+        message: domainSettingsResult.message
+      });
+    }
+
     if (isActive !== undefined) updatePayload.is_active = !!isActive;
+
+    if (!Object.keys(updatePayload).length) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one hotel field is required"
+      });
+    }
 
     const { data, error } = await supabase
       .from("hotels")
@@ -1237,6 +2023,84 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Failed to save payment Route settings"
+      });
+    }
+  }
+);
+
+router.post(
+  "/ordering-settings",
+  validateBody(hotelOrderingSettingsSchema),
+  async (req, res) => {
+    try {
+      const {
+        hotelSlug,
+        customerOrderingEnabled,
+        staffOrderingEnabled,
+        whatsappOrderingEnabled,
+        secureOnlinePaymentEnabled,
+        cashOnDeliveryEnabled,
+        manualUpiPaymentEnabled,
+        disabledTitle,
+        disabledMessage,
+        disabledButtonText,
+        disabledButtonLink,
+        disabledIcon
+      } = req.validatedBody;
+
+      const { data, error } = await supabase
+        .from("hotel_ordering_settings")
+        .upsert(
+          [
+            {
+              hotel_slug: hotelSlug,
+              customer_ordering_enabled:
+                customerOrderingEnabled !== undefined ? !!customerOrderingEnabled : true,
+              staff_ordering_enabled:
+                staffOrderingEnabled !== undefined ? !!staffOrderingEnabled : true,
+              secure_online_payment_enabled:
+                secureOnlinePaymentEnabled !== undefined ? !!secureOnlinePaymentEnabled : true,
+              cash_on_delivery_enabled:
+                cashOnDeliveryEnabled !== undefined ? !!cashOnDeliveryEnabled : true,
+              manual_upi_payment_enabled:
+                manualUpiPaymentEnabled !== undefined ? !!manualUpiPaymentEnabled : true,
+              whatsapp_ordering_enabled:
+                whatsappOrderingEnabled !== undefined ? !!whatsappOrderingEnabled : true,
+              disabled_title: normalizePublicText(disabledTitle || "", 160) || null,
+              disabled_message: normalizePublicText(disabledMessage || "", 1000) || null,
+              disabled_button_text: normalizePublicText(disabledButtonText || "", 120) || null,
+              disabled_button_link: normalizePublicText(disabledButtonLink || "", 2000) || null,
+              disabled_icon: normalizePublicText(disabledIcon || "", 40) || null,
+              updated_at: new Date().toISOString()
+            }
+          ],
+          { onConflict: "hotel_slug" }
+        )
+        .select()
+        .single();
+
+      if (error) {
+        if (isMissingHotelOrderingSettingsTableError(error)) {
+          return res.status(400).json({
+            success: false,
+            message: "Ordering settings table is not initialized yet"
+          });
+        }
+
+        throw error;
+      }
+
+      invalidateHotelOrderingSettings(hotelSlug);
+      res.json({
+        success: true,
+        message: "Ordering settings saved successfully",
+        settings: buildOrderingSettingsResponse(data, hotelSlug)
+      });
+    } catch (error) {
+      console.error("Ordering settings save error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to save ordering settings"
       });
     }
   }
@@ -1618,7 +2482,851 @@ router.delete("/testimonials/:id", async (req, res) => {
   }
 });
 
-router.post("/menu-items", validateBody(menuItemSchema), async (req, res) => {
+router.get("/popup-notifications", async (req, res) => {
+  try {
+    const hotelSlug = normalizePublicText(req.query.hotelSlug, 120);
+    let query = supabase
+      .from("hotel_popup_notifications")
+      .select("*")
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (hotelSlug) {
+      query = query.eq("hotel_slug", hotelSlug);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        return res.json({
+          success: true,
+          count: 0,
+          popupNotifications: []
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      count: Array.isArray(data) ? data.length : 0,
+      popupNotifications: data || []
+    });
+  } catch (error) {
+    console.error("Popup notifications fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch popup notifications"
+    });
+  }
+});
+
+router.post("/popup-notifications", validateBody(popupNotificationSchema), async (req, res) => {
+  try {
+    const {
+      hotelSlug,
+      title,
+      description,
+      imageUrl,
+      storagePath,
+      ctaText,
+      ctaLink,
+      isActive,
+      displayMode,
+      startAt,
+      endAt,
+      priority
+    } = req.validatedBody;
+
+    const { data, error } = await supabase
+      .from("hotel_popup_notifications")
+      .insert([
+        {
+          hotel_slug: hotelSlug,
+          title,
+          description: description || "",
+          image_url: imageUrl || "",
+          storage_path: storagePath || null,
+          cta_text: ctaText || "",
+          cta_link: normalizeAdminPopupLink(ctaLink || ""),
+          is_active: isActive !== undefined ? !!isActive : true,
+          display_mode: displayMode || "once_per_session",
+          start_at: normalizePopupTimestamp(startAt),
+          end_at: normalizePopupTimestamp(endAt),
+          priority: Number(priority || 0),
+          updated_at: new Date().toISOString()
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Popup notifications table is not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Popup notification created successfully",
+      popupNotification: data
+    });
+  } catch (error) {
+    console.error("Popup notification create error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create popup notification"
+    });
+  }
+});
+
+router.patch("/popup-notifications/:id", validateBody(partialPopupNotificationSchema), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      hotelSlug,
+      title,
+      description,
+      imageUrl,
+      storagePath,
+      ctaText,
+      ctaLink,
+      isActive,
+      displayMode,
+      startAt,
+      endAt,
+      priority
+    } = req.validatedBody;
+
+    const updatePayload = {
+      updated_at: new Date().toISOString()
+    };
+
+    if (hotelSlug !== undefined) updatePayload.hotel_slug = hotelSlug;
+    if (title !== undefined) updatePayload.title = title;
+    if (description !== undefined) updatePayload.description = description || "";
+    if (imageUrl !== undefined) updatePayload.image_url = imageUrl || "";
+    if (storagePath !== undefined) updatePayload.storage_path = storagePath || null;
+    if (ctaText !== undefined) updatePayload.cta_text = ctaText || "";
+    if (ctaLink !== undefined) updatePayload.cta_link = normalizeAdminPopupLink(ctaLink || "");
+    if (isActive !== undefined) updatePayload.is_active = !!isActive;
+    if (displayMode !== undefined) updatePayload.display_mode = displayMode;
+    if (startAt !== undefined) updatePayload.start_at = normalizePopupTimestamp(startAt);
+    if (endAt !== undefined) updatePayload.end_at = normalizePopupTimestamp(endAt);
+    if (priority !== undefined) updatePayload.priority = Number(priority);
+
+    if (Object.keys(updatePayload).length === 1) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one field is required to update a popup notification"
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("hotel_popup_notifications")
+      .update(updatePayload)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Popup notifications table is not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: "Popup notification updated successfully",
+      popupNotification: data
+    });
+  } catch (error) {
+    console.error("Popup notification update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update popup notification"
+    });
+  }
+});
+
+router.patch("/popup-notifications/:id/active", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isActive = req.body?.isActive;
+
+    const { data, error } = await supabase
+      .from("hotel_popup_notifications")
+      .update({
+        is_active: !!isActive,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Popup notifications table is not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: !!isActive ? "Popup notification activated" : "Popup notification deactivated",
+      popupNotification: data
+    });
+  } catch (error) {
+    console.error("Popup notification active toggle error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update popup notification status"
+    });
+  }
+});
+
+router.delete("/popup-notifications/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from("hotel_popup_notifications")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      if (isMissingPopupNotificationsRelationError(error)) {
+        return res.status(400).json({
+          success: false,
+          message: "Popup notifications table is not initialized yet"
+        });
+      }
+
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: "Popup notification deleted successfully"
+    });
+  } catch (error) {
+    console.error("Popup notification delete error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete popup notification"
+    });
+  }
+});
+
+router.get("/menu-combos", async (req, res) => {
+  try {
+    const hotelSlug = normalizePublicText(req.query.hotelSlug, 120);
+    let comboQuery = supabase
+      .from("menu_items")
+      .select("*")
+      .eq("item_type", "combo")
+      .order("category", { ascending: true })
+      .order("sort_order", { ascending: true })
+      .order("id", { ascending: true });
+
+    if (hotelSlug) {
+      comboQuery = comboQuery.eq("hotel_slug", hotelSlug);
+    }
+
+    const { data: comboRows, error: comboRowsError } = await comboQuery;
+
+    if (comboRowsError) {
+      if (isMissingMenuComboSchemaError(comboRowsError)) {
+        return res.json({
+          success: true,
+          count: 0,
+          menuCombos: []
+        });
+      }
+
+      throw comboRowsError;
+    }
+
+    const combos = Array.isArray(comboRows) ? comboRows : [];
+
+    if (!combos.length) {
+      return res.json({
+        success: true,
+        count: 0,
+        menuCombos: []
+      });
+    }
+
+    const hotelSlugs = [...new Set(combos.map((comboRow) => comboRow.hotel_slug).filter(Boolean))];
+    const comboItemIds = [...new Set(combos.map((comboRow) => comboRow.item_id).filter(Boolean))];
+    const { data: comboChildRows, error: comboChildRowsError } = await supabase
+      .from("menu_combo_items")
+      .select("*")
+      .in("hotel_slug", hotelSlugs)
+      .in("combo_item_id", comboItemIds)
+      .order("sort_order", { ascending: true })
+      .order("id", { ascending: true });
+
+    if (comboChildRowsError) {
+      if (isMissingMenuComboSchemaError(comboChildRowsError)) {
+        return res.status(400).json({
+          success: false,
+          message: "Combo menu schema is not initialized yet"
+        });
+      }
+
+      throw comboChildRowsError;
+    }
+
+    const { data: comboSettingsRows, error: comboSettingsRowsError } = await supabase
+      .from("menu_combo_settings")
+      .select("*")
+      .in("hotel_slug", hotelSlugs)
+      .in("combo_item_id", comboItemIds);
+
+    if (comboSettingsRowsError) {
+      if (isMissingMenuComboSchemaError(comboSettingsRowsError)) {
+        return res.status(400).json({
+          success: false,
+          message: "Combo menu schema is not initialized yet"
+        });
+      }
+
+      throw comboSettingsRowsError;
+    }
+
+    const comboChildRowsList = Array.isArray(comboChildRows) ? comboChildRows : [];
+    const childItemIds = [
+      ...new Set(comboChildRowsList.map((comboChildRow) => comboChildRow.child_item_id).filter(Boolean))
+    ];
+    let childMenuItems = [];
+
+    if (childItemIds.length) {
+      const childMenuItemsResponse = await supabase
+        .from("menu_items")
+        .select("hotel_slug,item_id,name,price,category,image,is_available")
+        .in("hotel_slug", hotelSlugs)
+        .in("item_id", childItemIds);
+
+      if (childMenuItemsResponse.error) {
+        throw childMenuItemsResponse.error;
+      }
+
+      childMenuItems = Array.isArray(childMenuItemsResponse.data)
+        ? childMenuItemsResponse.data
+        : [];
+    }
+
+    const childMenuItemMap = new Map(
+      childMenuItems.map((childMenuItem) => [
+        getMenuComboLookupKey(childMenuItem.hotel_slug, childMenuItem.item_id),
+        childMenuItem
+      ])
+    );
+    const comboChildRowsByKey = comboChildRowsList.reduce((accumulator, comboChildRow) => {
+      const comboLookupKey = getMenuComboLookupKey(
+        comboChildRow.hotel_slug,
+        comboChildRow.combo_item_id
+      );
+
+      if (!accumulator.has(comboLookupKey)) {
+        accumulator.set(comboLookupKey, []);
+      }
+
+      accumulator.get(comboLookupKey).push(comboChildRow);
+      return accumulator;
+    }, new Map());
+    const comboSettingsByKey = (Array.isArray(comboSettingsRows) ? comboSettingsRows : []).reduce(
+      (accumulator, comboSettingsRow) => {
+        accumulator.set(
+          getMenuComboLookupKey(comboSettingsRow.hotel_slug, comboSettingsRow.combo_item_id),
+          comboSettingsRow
+        );
+        return accumulator;
+      },
+      new Map()
+    );
+
+    const menuCombos = combos.map((comboRow) => {
+      const comboLookupKey = getMenuComboLookupKey(comboRow.hotel_slug, comboRow.item_id);
+
+      return buildAdminMenuComboResponse(
+        comboRow,
+        comboChildRowsByKey.get(comboLookupKey) || [],
+        comboSettingsByKey.get(comboLookupKey) || null,
+        childMenuItemMap
+      );
+    });
+
+    res.json({
+      success: true,
+      count: menuCombos.length,
+      menuCombos
+    });
+  } catch (error) {
+    console.error("Menu combos fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch menu combos"
+    });
+  }
+});
+
+router.get("/menu-combos/:id", async (req, res) => {
+  try {
+    const combo = await getAdminMenuComboByDbId(req.params.id);
+
+    if (!combo) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu combo not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      menuCombo: combo
+    });
+  } catch (error) {
+    if (isMissingMenuComboSchemaError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo menu schema is not initialized yet"
+      });
+    }
+
+    console.error("Menu combo fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch menu combo"
+    });
+  }
+});
+
+router.post("/menu-combos", validateBody(comboMenuItemSchema), requireAdminFoodModule, async (req, res) => {
+  let createdComboRow = null;
+
+  try {
+    const {
+      hotelSlug,
+      category,
+      itemId,
+      name,
+      description,
+      price,
+      image,
+      alt,
+      badge,
+      tag,
+      isAvailable,
+      sortOrder,
+      childItems,
+      startDate,
+      endDate,
+      startTime,
+      endTime
+    } = req.validatedBody;
+
+    const normalizedHotelSlug = normalizePublicText(hotelSlug, 120);
+    const normalizedItemId = normalizePublicText(itemId, 120);
+    const { data: existingMenuItem, error: existingMenuItemError } = await supabase
+      .from("menu_items")
+      .select("id,item_id")
+      .eq("hotel_slug", normalizedHotelSlug)
+      .eq("item_id", normalizedItemId)
+      .maybeSingle();
+
+    if (existingMenuItemError) {
+      throw existingMenuItemError;
+    }
+
+    if (existingMenuItem) {
+      throw createHttpError(
+        409,
+        `Menu item "${normalizedItemId}" already exists for hotel "${normalizedHotelSlug}"`
+      );
+    }
+
+    await fetchValidatedComboChildMenuItems({
+      hotelSlug: normalizedHotelSlug,
+      childItems
+    });
+
+    const { data, error } = await supabase
+      .from("menu_items")
+      .insert([
+        {
+          hotel_slug: normalizedHotelSlug,
+          category,
+          item_id: normalizedItemId,
+          item_type: "combo",
+          name,
+          description: description || "",
+          price: Number(price || 0),
+          image: image || "",
+          alt: alt || "",
+          badge: badge || "",
+          tag: tag || "",
+          is_available: isAvailable !== undefined ? !!isAvailable : true,
+          sort_order: Number(sortOrder || 0),
+          updated_at: new Date().toISOString()
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      if (isMenuItemsIdSequenceConflict(error)) {
+        throw createHttpError(
+          409,
+          "menu_items id sequence is out of sync. Run backend/scripts/reset-menu-items-id-sequence.sql once, then retry."
+        );
+      }
+
+      throw error;
+    }
+
+    createdComboRow = data;
+
+    await replaceMenuComboChildren({
+      hotelSlug: normalizedHotelSlug,
+      comboItemId: normalizedItemId,
+      childItems
+    });
+
+    await syncMenuComboSettings({
+      hotelSlug: normalizedHotelSlug,
+      comboItemId: normalizedItemId,
+      startDate,
+      endDate,
+      startTime,
+      endTime
+    });
+
+    const createdCombo = await getAdminMenuComboByDbId(createdComboRow.id);
+
+    res.status(201).json({
+      success: true,
+      message: "Menu combo created successfully",
+      menuCombo: createdCombo
+    });
+  } catch (error) {
+    if (createdComboRow?.id) {
+      await supabase
+        .from("menu_combo_items")
+        .delete()
+        .eq("hotel_slug", createdComboRow.hotel_slug)
+        .eq("combo_item_id", createdComboRow.item_id);
+      await supabase
+        .from("menu_combo_settings")
+        .delete()
+        .eq("hotel_slug", createdComboRow.hotel_slug)
+        .eq("combo_item_id", createdComboRow.item_id);
+      await supabase.from("menu_items").delete().eq("id", createdComboRow.id);
+    }
+
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    if (isMissingMenuComboSchemaError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo menu schema is not initialized yet"
+      });
+    }
+
+    console.error("Menu combo create error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create menu combo"
+    });
+  }
+});
+
+router.patch("/menu-combos/:id", validateBody(partialComboMenuItemSchema), requireAdminFoodModule, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existingCombo = await getAdminMenuComboByDbId(id);
+
+    if (!existingCombo) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu combo not found"
+      });
+    }
+
+    if (
+      req.validatedBody.hotelSlug !== undefined &&
+      String(req.validatedBody.hotelSlug).trim() !== existingCombo.hotelSlug
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo hotel slug cannot be changed after creation"
+      });
+    }
+
+    if (
+      req.validatedBody.itemId !== undefined &&
+      String(req.validatedBody.itemId).trim() !== existingCombo.itemId
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo item id cannot be changed after creation"
+      });
+    }
+
+    const {
+      category,
+      name,
+      description,
+      price,
+      image,
+      alt,
+      badge,
+      tag,
+      isAvailable,
+      sortOrder,
+      childItems
+    } = req.validatedBody;
+
+    const updatePayload = {
+      updated_at: new Date().toISOString()
+    };
+
+    if (category !== undefined) updatePayload.category = category;
+    if (name !== undefined) updatePayload.name = name;
+    if (description !== undefined) updatePayload.description = description || "";
+    if (price !== undefined) updatePayload.price = Number(price);
+    if (image !== undefined) updatePayload.image = image || "";
+    if (alt !== undefined) updatePayload.alt = alt || "";
+    if (badge !== undefined) updatePayload.badge = badge || "";
+    if (tag !== undefined) updatePayload.tag = tag || "";
+    if (isAvailable !== undefined) updatePayload.is_available = !!isAvailable;
+    if (sortOrder !== undefined) updatePayload.sort_order = Number(sortOrder);
+
+    if (Object.keys(updatePayload).length > 1) {
+      const { error: updateError } = await supabase
+        .from("menu_items")
+        .update(updatePayload)
+        .eq("id", id)
+        .eq("item_type", "combo");
+
+      if (updateError) {
+        throw updateError;
+      }
+    }
+
+    if (childItems !== undefined) {
+      await replaceMenuComboChildren({
+        hotelSlug: existingCombo.hotelSlug,
+        comboItemId: existingCombo.itemId,
+        childItems
+      });
+    }
+
+    if (
+      req.validatedBody.startDate !== undefined ||
+      req.validatedBody.endDate !== undefined ||
+      req.validatedBody.startTime !== undefined ||
+      req.validatedBody.endTime !== undefined
+    ) {
+      await syncMenuComboSettings({
+        hotelSlug: existingCombo.hotelSlug,
+        comboItemId: existingCombo.itemId,
+        startDate:
+          req.validatedBody.startDate !== undefined
+            ? req.validatedBody.startDate
+            : existingCombo.startDate,
+        endDate:
+          req.validatedBody.endDate !== undefined
+            ? req.validatedBody.endDate
+            : existingCombo.endDate,
+        startTime:
+          req.validatedBody.startTime !== undefined
+            ? req.validatedBody.startTime
+            : existingCombo.startTime,
+        endTime:
+          req.validatedBody.endTime !== undefined
+            ? req.validatedBody.endTime
+            : existingCombo.endTime
+      });
+    }
+
+    if (
+      Object.keys(updatePayload).length === 1 &&
+      childItems === undefined &&
+      req.validatedBody.startDate === undefined &&
+      req.validatedBody.endDate === undefined &&
+      req.validatedBody.startTime === undefined &&
+      req.validatedBody.endTime === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one field is required to update a menu combo"
+      });
+    }
+
+    const updatedCombo = await getAdminMenuComboByDbId(id);
+
+    res.json({
+      success: true,
+      message: "Menu combo updated successfully",
+      menuCombo: updatedCombo
+    });
+  } catch (error) {
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    if (isMissingMenuComboSchemaError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo menu schema is not initialized yet"
+      });
+    }
+
+    console.error("Menu combo update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update menu combo"
+    });
+  }
+});
+
+router.patch("/menu-combos/:id/active", requireAdminFoodModule, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isAvailable = req.body?.isAvailable;
+    const { data, error } = await supabase
+      .from("menu_items")
+      .update({
+        is_available: !!isAvailable,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id)
+      .eq("item_type", "combo")
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu combo not found"
+      });
+    }
+
+    const updatedCombo = await getAdminMenuComboByDbId(id);
+
+    res.json({
+      success: true,
+      message: !!isAvailable ? "Menu combo activated" : "Menu combo deactivated",
+      menuCombo: updatedCombo
+    });
+  } catch (error) {
+    if (isMissingMenuComboSchemaError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo menu schema is not initialized yet"
+      });
+    }
+
+    console.error("Menu combo active toggle error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update menu combo status"
+    });
+  }
+});
+
+router.delete("/menu-combos/:id", requireAdminFoodModule, async (req, res) => {
+  try {
+    const existingCombo = await getAdminMenuComboByDbId(req.params.id);
+
+    if (!existingCombo) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu combo not found"
+      });
+    }
+
+    const { error: comboChildrenDeleteError } = await supabase
+      .from("menu_combo_items")
+      .delete()
+      .eq("hotel_slug", existingCombo.hotelSlug)
+      .eq("combo_item_id", existingCombo.itemId);
+
+    if (comboChildrenDeleteError) {
+      throw comboChildrenDeleteError;
+    }
+
+    const { error: comboSettingsDeleteError } = await supabase
+      .from("menu_combo_settings")
+      .delete()
+      .eq("hotel_slug", existingCombo.hotelSlug)
+      .eq("combo_item_id", existingCombo.itemId);
+
+    if (comboSettingsDeleteError) {
+      throw comboSettingsDeleteError;
+    }
+
+    const { error: comboDeleteError } = await supabase
+      .from("menu_items")
+      .delete()
+      .eq("id", req.params.id)
+      .eq("item_type", "combo");
+
+    if (comboDeleteError) {
+      throw comboDeleteError;
+    }
+
+    res.json({
+      success: true,
+      message: "Menu combo deleted successfully"
+    });
+  } catch (error) {
+    if (isMissingMenuComboSchemaError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: "Combo menu schema is not initialized yet"
+      });
+    }
+
+    console.error("Menu combo delete error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete menu combo"
+    });
+  }
+});
+
+router.post("/menu-items", validateBody(menuItemSchema), requireAdminFoodModule, async (req, res) => {
   try {
     const {
       hotelSlug,
@@ -1684,21 +3392,15 @@ router.post("/gallery-items", validateBody(galleryItemSchema), async (req, res) 
       sortOrder
     } = req.validatedBody;
 
-    const { data, error } = await supabase
-      .from("gallery_items")
-      .insert([
-        {
-          hotel_slug: hotelSlug,
-          image_url: imageUrl,
-          storage_path: storagePath || null,
-          alt: alt || "",
-          layout_variant: layoutVariant || "standard",
-          is_active: isActive !== undefined ? !!isActive : true,
-          sort_order: Number(sortOrder || 0)
-        }
-      ])
-      .select()
-      .single();
+    const { data, error } = await insertGalleryItemWithCompatibility({
+      hotel_slug: hotelSlug,
+      image_url: imageUrl,
+      storage_path: storagePath || null,
+      alt: alt || "",
+      layout_variant: layoutVariant || "standard",
+      is_active: isActive !== undefined ? !!isActive : true,
+      sort_order: Number(sortOrder || 0)
+    });
 
     if (error) throw error;
 
@@ -1716,7 +3418,7 @@ router.post("/gallery-items", validateBody(galleryItemSchema), async (req, res) 
   }
 });
 
-router.patch("/menu-items/:id", async (req, res) => {
+router.patch("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -1802,12 +3504,7 @@ router.patch("/gallery-items/:id", validateBody(partialGalleryItemSchema), async
       });
     }
 
-    const { data, error } = await supabase
-      .from("gallery_items")
-      .update(updatePayload)
-      .eq("id", id)
-      .select()
-      .single();
+    const { data, error } = await updateGalleryItemWithCompatibility(id, updatePayload);
 
     if (error) throw error;
 
@@ -1825,7 +3522,7 @@ router.patch("/gallery-items/:id", validateBody(partialGalleryItemSchema), async
   }
 });
 
-router.patch("/menu-items/:id/archive", async (req, res) => {
+router.patch("/menu-items/:id/archive", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const { isArchived } = req.body;
@@ -1872,7 +3569,17 @@ router.patch("/gallery-items/:id/archive", async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (isMenuItemsIdSequenceConflict(error)) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "menu_items id sequence is out of sync. Run backend/scripts/reset-menu-items-id-sequence.sql once, then retry."
+        });
+      }
+
+      throw error;
+    }
 
     res.json({
       success: true,
@@ -1888,7 +3595,7 @@ router.patch("/gallery-items/:id/archive", async (req, res) => {
   }
 });
 
-router.delete("/menu-items/:id", async (req, res) => {
+router.delete("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
 

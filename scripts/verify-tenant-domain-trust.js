@@ -82,7 +82,7 @@ function main() {
   if (
     !hasPattern(
       publicRoutesSource,
-      /const\s*\{\s*ensurePublicHotelAccess\s*\}\s*=\s*require\("\.\.\/utils\/public-hotel-access"\);/m
+      /const\s*\{(?:(?!\}\s*=\s*require)[\s\S])*?ensurePublicHotelAccess(?:(?!\}\s*=\s*require)[\s\S])*?\}\s*=\s*require\("\.\.\/utils\/public-hotel-access"\);/m
     )
   ) {
     failures.push("public.js is not importing ensurePublicHotelAccess from the shared public-hotel-access util");
