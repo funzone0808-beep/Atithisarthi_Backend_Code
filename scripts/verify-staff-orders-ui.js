@@ -836,7 +836,7 @@ function verifyDashboardContracts(html, frontend, failures) {
   ], failures);
 
   checkPatterns(html, "Dashboard scripts", [
-    { name: "local Chart.js and review notification dependencies load before Staff Orders", pattern: /<script src="node_modules\/chart\.js\/dist\/chart\.umd\.js" defer><\/script>\s*<script src="js\/review-avatar\.js" defer><\/script>\s*<script src="js\/staff-notification-cards\.js" defer><\/script>\s*<script src="js\/staff-orders\.js" defer><\/script>/m }
+    { name: "deployable local Chart.js and review notification dependencies load before Staff Orders", pattern: /<script src="vendor\/chart\.umd\.js" defer><\/script>\s*<script src="js\/review-avatar\.js" defer><\/script>\s*<script src="js\/staff-notification-cards\.js" defer><\/script>\s*<script src="js\/staff-orders\.js" defer><\/script>/m }
   ], failures);
 }
 
@@ -1299,7 +1299,10 @@ function main() {
     { name: "scroll restore source and user guard", pattern: /function\s+restoreStaffOrdersScrollAnchorState[\s\S]*?getStaffSelectedOrderSourceCard\(\)\s*!==\s*scrollAnchorState\.sourceCard[\s\S]*?Math\.abs\(currentScrollY\s*-\s*Number\(scrollAnchorState\.windowScrollY\s*\|\|\s*0\)\)\s*>\s*2/m },
     { name: "scroll restored after order render", pattern: /renderCurrentStaffOrders\(\);\s*restoreStaffOrdersScrollAnchorState\(scrollAnchorState\);\s*restoreStaffOrdersFocusState\(focusState\);/m },
     { name: "refresh render signature", pattern: /function\s+getStaffOrdersRenderSignature\(orders\s*=\s*\[\]\)/m },
-    { name: "3-second QR and KDS refresh", pattern: /const\s+STAFF_AUTO_REFRESH_INTERVAL_MS\s*=\s*3\s*\*\s*1000;/m },
+    { name: "non-overlapping production polling intervals", pattern: /const\s+STAFF_AUTO_REFRESH_INTERVAL_MS\s*=\s*15\s*\*\s*1000;[\s\S]*?const\s+STAFF_KDS_AUTO_REFRESH_INTERVAL_MS\s*=\s*5\s*\*\s*1000;[\s\S]*?staffAutoRefreshInFlight/m },
+    { name: "advance policy only after existing-session authentication", pattern: /function\s+checkExistingStaffSession[\s\S]*?staffFetchJson\(`\$\{STAFF_API_BASE\}\/me`\)[\s\S]*?loadStaffRoomAdvancePolicySafely\(\)/m },
+    { name: "advance policy only after login token storage", pattern: /setStaffToken\(result\.token\)[\s\S]*?loadStaffRoomAdvancePolicySafely\(\)/m },
+    { name: "rate-limited slow-request diagnostics", pattern: /STAFF_SLOW_REQUEST_WARNING_MS\s*=\s*3000[\s\S]*?STAFF_SLOW_REQUEST_WARNING_COOLDOWN_MS\s*=\s*60\s*\*\s*1000[\s\S]*?staffSlowRequestWarningAtByPath/m },
     { name: "loading skeleton", pattern: /staff-orders-skeleton-card/m },
     { name: "retry action", pattern: /data-staff-orders-retry/m },
     { name: "financial UI gate", pattern: /function\s+canStaffViewOrderFinancials\(order\s*=\s*\{\}\)/m },

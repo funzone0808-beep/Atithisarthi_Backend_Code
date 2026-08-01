@@ -90,7 +90,8 @@
     "verify:performance-payment-settings-api": "node scripts/verify-performance-payment-settings-api.js",
     "load:performance-readonly": "node scripts/load-performance-readonly.js",
     "verify:admin-page-production": "node scripts/verify-admin-page-production.js",
-    "verify:client-readiness-documentation": "node scripts/verify-client-readiness-documentation.js"
+    "verify:client-readiness-documentation": "node scripts/verify-client-readiness-documentation.js",
+    "verify:dynamic-menu-categories": "node scripts/verify-dynamic-menu-categories.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",

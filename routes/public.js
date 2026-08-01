@@ -16,6 +16,13 @@ const {
   getCachedPublicRoutePayload,
   setCachedPublicRoutePayload
 } = require("../utils/public-route-cache");
+const {
+  buildEligibleCategoryDtos,
+  createMenuVersion,
+  fetchHotelMenuCategories,
+  normalizeMenuCategoryKey,
+  resolveMenuItemDisplayImage
+} = require("../utils/menu-categories");
 const router = express.Router();
 const PUBLIC_ROUTE_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=120";
 const PUBLIC_ROUTE_CACHE_TTL_MS = 30 * 1000;
@@ -295,6 +302,17 @@ router.get("/menu/:slug", async (req, res) => {
 
     if (error) throw error;
 
+    const categoryResult = await fetchHotelMenuCategories({
+      supabase,
+      hotelSlug: slug,
+      consumer: "website",
+      menuItems: data || []
+    });
+    const categoryDtos = buildEligibleCategoryDtos(categoryResult.categories, data || [], {
+      hideEmpty: true
+    });
+    const categoryByKey = new Map(categoryDtos.map((category) => [category.key, category]));
+
     let comboPresentationMap = new Map();
 
     try {
@@ -311,7 +329,10 @@ router.get("/menu/:slug", async (req, res) => {
     const groupedMenu = {};
 
     for (const item of data || []) {
-      const category = item.category || "others";
+      const category = normalizeMenuCategoryKey(item.category);
+      const categoryDto = categoryByKey.get(category);
+      if (!categoryDto) continue;
+      const displayImage = resolveMenuItemDisplayImage(item, categoryDto);
       const comboPresentation = comboPresentationMap.get(item.item_id);
       const isComboItem = String(item.item_type || "single").trim() === "combo";
 
@@ -328,7 +349,8 @@ router.get("/menu/:slug", async (req, res) => {
         name: item.name,
         desc: item.description || "",
         price: Number(item.price || 0),
-        image: item.image || "",
+        image: displayImage.url,
+        imageMeta: displayImage,
         alt: item.alt || item.name || "",
         badge: item.badge || (comboPresentation ? "Combo" : ""),
         tag: item.tag || "",
@@ -342,9 +364,17 @@ router.get("/menu/:slug", async (req, res) => {
         endTime: comboPresentation?.endTime || ""
       });
     }
+    const visibleItems = Object.values(groupedMenu).flat();
+    const visibleCategories = categoryDtos.filter(
+      (category) => Array.isArray(groupedMenu[category.key]) && groupedMenu[category.key].length > 0
+    );
+    const menuVersion = createMenuVersion({ categories: visibleCategories, items: visibleItems });
 
     const payload = {
       success: true,
+      menuVersion,
+      categorySource: categoryResult.source,
+      categories: visibleCategories,
       menu: groupedMenu
     };
 

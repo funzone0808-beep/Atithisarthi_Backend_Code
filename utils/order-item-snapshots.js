@@ -37,6 +37,8 @@ async function buildOrderItemSnapshots({
     return {
       id: itemId,
       name: menuItem.name || itemId,
+      category: String(menuItem.category || "").trim(),
+      categoryName: String(menuItem.category || "").trim(),
       qty,
       price,
       lineTotal: price * qty,

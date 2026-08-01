@@ -23,6 +23,9 @@ const {
   partialPopupNotificationSchema,
   qrLinkSignatureSchema,
   menuItemSchema,
+  partialMenuItemSchema,
+  menuCategorySchema,
+  partialMenuCategorySchema,
   comboMenuItemSchema,
   partialComboMenuItemSchema,
   partialHotelSchema,
@@ -46,6 +49,15 @@ const {
   invalidateHotelOrderingSettings,
   isMissingHotelOrderingSettingsTableError
 } = require("../utils/hotel-ordering-settings");
+const { invalidatePublicMenuCache } = require("../utils/public-route-cache");
+const {
+  buildMenuCategoryDto,
+  createMenuCategorySlug,
+  fetchHotelMenuCategories,
+  isMissingMenuCategoriesSchemaError,
+  normalizeMenuCategoryKey,
+  normalizeMenuCategoryText
+} = require("../utils/menu-categories");
 
 const NOTIFICATION_EVENT_SOURCE_TYPES = [
   "order",
@@ -76,7 +88,9 @@ async function resolveAdminFoodOperationHotelSlug(req = {}) {
     ? "orders"
     : pathName.startsWith("/reservations/")
       ? "reservations"
-      : pathName.startsWith("/menu-items/") || pathName.startsWith("/menu-combos/")
+      : pathName.startsWith("/menu-categories/")
+        ? "menu_categories"
+        : pathName.startsWith("/menu-items/") || pathName.startsWith("/menu-combos/")
         ? "menu_items"
         : "";
   if (!table) return "";
@@ -893,6 +907,85 @@ async function applyValidatedHotelDomainSettings({
     ok: true,
     updatePayload
   };
+}
+
+function buildMenuCategoryWritePayload(body = {}, existing = {}) {
+  const payload = {};
+  const assign = (inputKey, column, transform = (value) => value) => {
+    if (body[inputKey] !== undefined) payload[column] = transform(body[inputKey]);
+  };
+  assign("hotelSlug", "hotel_slug", (value) => normalizeMenuCategoryText(value, 120));
+  assign("categoryKey", "category_key", normalizeMenuCategoryKey);
+  assign("name", "name", (value) => normalizeMenuCategoryText(value, 160));
+  assign("slug", "slug", (value) => createMenuCategorySlug(value));
+  assign("description", "description", (value) => normalizeMenuCategoryText(value, 1000));
+  assign("displayOrder", "display_order", (value) => Number(value || 0));
+  assign("isActive", "is_active", Boolean);
+  assign("isPublished", "is_published", Boolean);
+  assign("staffEnabled", "staff_enabled", Boolean);
+  assign("websiteEnabled", "website_enabled", Boolean);
+  assign("qrEnabled", "qr_enabled", Boolean);
+  assign("defaultImageUrl", "default_image_url", (value) => normalizeMenuCategoryText(value, 2000) || null);
+  assign("defaultThumbnailUrl", "default_thumbnail_url", (value) => normalizeMenuCategoryText(value, 2000) || null);
+  assign("imageStoragePath", "image_storage_path", (value) => normalizeMenuCategoryText(value, 500) || null);
+  assign("imageAltText", "image_alt_text", (value) => normalizeMenuCategoryText(value, 300));
+  const imageChanged = ["defaultImageUrl", "defaultThumbnailUrl", "imageStoragePath"].some(
+    (key) => body[key] !== undefined
+  );
+  if (imageChanged) payload.image_version = Number(existing.image_version || 0) + 1;
+  payload.updated_at = new Date().toISOString();
+  return payload;
+}
+
+function assertMenuCategoryImageScope(hotelSlug, body = {}) {
+  const normalizedHotelSlug = normalizeMenuCategoryText(hotelSlug, 120).toLowerCase();
+  const storagePath = normalizeMenuCategoryText(body.imageStoragePath, 500).toLowerCase();
+  const hasRemoteImage = [body.defaultImageUrl, body.defaultThumbnailUrl].some((value) =>
+    /^https?:\/\//i.test(String(value || "").trim())
+  );
+  if (storagePath && !storagePath.startsWith(`${normalizedHotelSlug}/`)) {
+    throw createHttpError(400, "Category image storage path does not belong to this hotel");
+  }
+  if (hasRemoteImage && !storagePath) {
+    throw createHttpError(400, "Uploaded category images require a hotel-scoped storage path");
+  }
+}
+
+async function ensureAdminMenuCategoryBelongsToHotel(hotelSlug, categoryKey) {
+  const normalizedHotelSlug = normalizeMenuCategoryText(hotelSlug, 120);
+  const normalizedCategoryKey = normalizeMenuCategoryKey(categoryKey);
+  if (!normalizedHotelSlug || !normalizedCategoryKey) {
+    throw createHttpError(400, "A valid hotel-scoped menu category is required");
+  }
+  const { data, error } = await supabase
+    .from("menu_categories")
+    .select("id,hotel_slug,category_key,is_active")
+    .eq("hotel_slug", normalizedHotelSlug)
+    .eq("category_key", normalizedCategoryKey)
+    .maybeSingle();
+  if (error) {
+    if (isMissingMenuCategoriesSchemaError(error)) return null;
+    throw error;
+  }
+  if (!data) {
+    throw createHttpError(400, "The selected menu category does not belong to this hotel");
+  }
+  return data;
+}
+
+async function writeMenuCategoryAudit({ action, before = null, after = null }) {
+  const row = after || before || {};
+  const { error } = await supabase.from("menu_category_audit").insert([{
+    hotel_slug: row.hotel_slug,
+    category_id: row.id,
+    action,
+    actor: "admin",
+    before_data: before,
+    after_data: after
+  }]);
+  if (error && !isMissingMenuCategoriesSchemaError(error)) {
+    console.warn("Menu category audit write failed:", error.message || error);
+  }
 }
 
 router.use(requireAdminAuth);
@@ -2138,6 +2231,161 @@ router.get("/hotel-profiles/:slug", async (req, res) => {
   }
 });
 
+router.get("/menu-categories", requireAdminFoodModule, async (req, res) => {
+  try {
+    const hotelSlug = normalizeMenuCategoryText(req.query.hotelSlug, 120);
+    if (!hotelSlug) {
+      return res.status(400).json({ success: false, message: "Select a hotel to manage its menu categories" });
+    }
+    const { data: menuItems, error: menuItemsError } = await supabase
+      .from("menu_items")
+      .select("hotel_slug,category,sort_order")
+      .eq("hotel_slug", hotelSlug)
+      .order("sort_order", { ascending: true });
+    if (menuItemsError) throw menuItemsError;
+    const result = await fetchHotelMenuCategories({
+      supabase,
+      hotelSlug,
+      consumer: "manager",
+      menuItems: menuItems || []
+    });
+    res.json({
+      success: true,
+      hotelSlug,
+      source: result.source,
+      categories: result.categories.map((category) => buildMenuCategoryDto(
+        category,
+        (menuItems || []).filter((item) => item.category === category.category_key).length
+      ))
+    });
+  } catch (error) {
+    console.error("Menu categories fetch error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch menu categories" });
+  }
+});
+
+router.post(
+  "/menu-categories",
+  validateBody(menuCategorySchema),
+  requireAdminFoodModule,
+  async (req, res) => {
+    try {
+      const input = req.validatedBody;
+      assertMenuCategoryImageScope(input.hotelSlug, input);
+      const payload = buildMenuCategoryWritePayload({
+        ...input,
+        slug: input.slug || createMenuCategorySlug(input.name)
+      });
+      const { data, error } = await supabase.from("menu_categories").insert([payload]).select().single();
+      if (error) {
+        if (String(error.code || "") === "23505") {
+          return res.status(409).json({
+            success: false,
+            message: "Category key or public slug already exists for this hotel"
+          });
+        }
+        throw error;
+      }
+      await writeMenuCategoryAudit({ action: "create", after: data });
+      invalidatePublicMenuCache(data.hotel_slug);
+      res.status(201).json({
+        success: true,
+        message: "Menu category created successfully",
+        category: buildMenuCategoryDto(data, 0)
+      });
+    } catch (error) {
+      console.error("Menu category create error:", error);
+      res.status(Number(error.statusCode || 500)).json({
+        success: false,
+        message: error.statusCode ? error.message : "Failed to create menu category"
+      });
+    }
+  }
+);
+
+router.patch(
+  "/menu-categories/:id",
+  validateBody(partialMenuCategorySchema),
+  requireAdminFoodModule,
+  async (req, res) => {
+    try {
+      const { data: existing, error: existingError } = await supabase
+        .from("menu_categories")
+        .select("*")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (!existing) return res.status(404).json({ success: false, message: "Menu category not found" });
+      assertMenuCategoryImageScope(existing.hotel_slug, req.validatedBody);
+      const updatePayload = buildMenuCategoryWritePayload(req.validatedBody, existing);
+      const { data, error } = await supabase
+        .from("menu_categories")
+        .update(updatePayload)
+        .eq("id", existing.id)
+        .eq("hotel_slug", existing.hotel_slug)
+        .select()
+        .single();
+      if (error) {
+        if (String(error.code || "") === "23505") {
+          return res.status(409).json({ success: false, message: "Public category slug already exists" });
+        }
+        throw error;
+      }
+      await writeMenuCategoryAudit({ action: "update", before: existing, after: data });
+      invalidatePublicMenuCache(existing.hotel_slug);
+      res.json({
+        success: true,
+        message: "Menu category updated successfully",
+        category: buildMenuCategoryDto(data, 0)
+      });
+    } catch (error) {
+      console.error("Menu category update error:", error);
+      res.status(Number(error.statusCode || 500)).json({
+        success: false,
+        message: error.statusCode ? error.message : "Failed to update menu category"
+      });
+    }
+  }
+);
+
+router.delete("/menu-categories/:id", requireAdminFoodModule, async (req, res) => {
+  try {
+    const { data: existing, error: existingError } = await supabase
+      .from("menu_categories")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (!existing) return res.status(404).json({ success: false, message: "Menu category not found" });
+
+    const { count, error: countError } = await supabase
+      .from("menu_items")
+      .select("item_id", { count: "exact", head: true })
+      .eq("hotel_slug", existing.hotel_slug)
+      .eq("category", existing.category_key);
+    if (countError) throw countError;
+    if (Number(count || 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "This category still has menu items. Move the items or archive the category instead."
+      });
+    }
+
+    const { error } = await supabase
+      .from("menu_categories")
+      .delete()
+      .eq("id", existing.id)
+      .eq("hotel_slug", existing.hotel_slug);
+    if (error) throw error;
+    await writeMenuCategoryAudit({ action: "delete", before: existing });
+    invalidatePublicMenuCache(existing.hotel_slug);
+    res.json({ success: true, message: "Menu category deleted successfully" });
+  } catch (error) {
+    console.error("Menu category delete error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete menu category" });
+  }
+});
+
 router.get("/menu-items", async (req, res) => {
   try {
     const { hotelSlug } = req.query;
@@ -3343,6 +3591,8 @@ router.post("/menu-items", validateBody(menuItemSchema), requireAdminFoodModule,
       sortOrder
     } = req.validatedBody;
 
+    await ensureAdminMenuCategoryBelongsToHotel(hotelSlug, category);
+
     const { data, error } = await supabase
       .from("menu_items")
       .insert([
@@ -3366,6 +3616,7 @@ router.post("/menu-items", validateBody(menuItemSchema), requireAdminFoodModule,
 
     if (error) throw error;
 
+    invalidatePublicMenuCache(hotelSlug);
     res.status(201).json({
       success: true,
       message: "Menu item created successfully",
@@ -3373,9 +3624,9 @@ router.post("/menu-items", validateBody(menuItemSchema), requireAdminFoodModule,
     });
   } catch (error) {
     console.error("Menu item create error:", error);
-    res.status(500).json({
+    res.status(Number(error.statusCode || 500)).json({
       success: false,
-      message: "Failed to create menu item"
+      message: error.statusCode ? error.message : "Failed to create menu item"
     });
   }
 });
@@ -3418,7 +3669,7 @@ router.post("/gallery-items", validateBody(galleryItemSchema), async (req, res) 
   }
 });
 
-router.patch("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
+router.patch("/menu-items/:id", validateBody(partialMenuItemSchema), requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -3433,7 +3684,18 @@ router.patch("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
       tag,
       isAvailable,
       sortOrder
-    } = req.body;
+    } = req.validatedBody;
+
+    const { data: existing, error: existingError } = await supabase
+      .from("menu_items")
+      .select("id,hotel_slug,category")
+      .eq("id", id)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (!existing) return res.status(404).json({ success: false, message: "Menu item not found" });
+    if (category !== undefined) {
+      await ensureAdminMenuCategoryBelongsToHotel(existing.hotel_slug, category);
+    }
 
     const updatePayload = {};
 
@@ -3453,11 +3715,13 @@ router.patch("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
       .from("menu_items")
       .update(updatePayload)
       .eq("id", id)
+      .eq("hotel_slug", existing.hotel_slug)
       .select()
       .single();
 
     if (error) throw error;
 
+    invalidatePublicMenuCache(existing.hotel_slug);
     res.json({
       success: true,
       message: "Menu item updated successfully",
@@ -3508,6 +3772,7 @@ router.patch("/gallery-items/:id", validateBody(partialGalleryItemSchema), async
 
     if (error) throw error;
 
+    invalidatePublicMenuCache(data.hotel_slug);
     res.json({
       success: true,
       message: "Gallery item updated successfully",
@@ -3538,6 +3803,7 @@ router.patch("/menu-items/:id/archive", requireAdminFoodModule, async (req, res)
       .single();
 
     if (error) throw error;
+    if (existing?.hotel_slug) invalidatePublicMenuCache(existing.hotel_slug);
 
     res.json({
       success: true,
@@ -3598,6 +3864,12 @@ router.patch("/gallery-items/:id/archive", async (req, res) => {
 router.delete("/menu-items/:id", requireAdminFoodModule, async (req, res) => {
   try {
     const { id } = req.params;
+    const { data: existing, error: existingError } = await supabase
+      .from("menu_items")
+      .select("hotel_slug")
+      .eq("id", id)
+      .maybeSingle();
+    if (existingError) throw existingError;
 
     const { error } = await supabase
       .from("menu_items")

@@ -56,7 +56,7 @@ assert(/@media\s*\(max-width:\s*420px\)/.test(adminCss), "Small-mobile admin bre
 assert(/prefers-reduced-motion/.test(adminCss), "Reduced-motion support is missing.");
 
 const dataTabButtons = [...adminHtml.matchAll(/<button\b[^>]*\bdata-tab=["'][^"']+["'][^>]*>/gi)];
-assert(dataTabButtons.length === 12, `Expected 12 admin data tabs, found ${dataTabButtons.length}.`);
+assert(dataTabButtons.length === 13, `Expected 13 admin data tabs, found ${dataTabButtons.length}.`);
 assert(
   dataTabButtons.every(
     (match) =>

@@ -3,6 +3,7 @@ const multer = require("multer");
 const path = require("path");
 const { supabase } = require("../utils/supabase");
 const { requireAdminAuth } = require("../middleware/require-admin-auth");
+const { getImageDimensions } = require("../utils/image-dimensions");
 
 const router = express.Router();
 
@@ -157,6 +158,23 @@ router.post(
           success: false,
           message: `Invalid image file. Please upload a valid ${ALLOWED_IMAGE_TYPE_LABEL} file.`
         });
+      }
+      const dimensions = getImageDimensions(file.buffer, file.mimetype);
+      if (dimensions) {
+        const pixels = Number(dimensions.width) * Number(dimensions.height);
+        if (dimensions.width > 8000 || dimensions.height > 8000 || pixels > 40_000_000) {
+          return res.status(400).json({
+            success: false,
+            message: "Image dimensions are too large. Use an image up to 8000 x 8000 and 40 megapixels."
+          });
+        }
+        const isMenuImage = /^(menu-items|menu-categories)(\/|$)/i.test(folder);
+        if (isMenuImage && (dimensions.width < 160 || dimensions.height < 160)) {
+          return res.status(400).json({
+            success: false,
+            message: "Menu images must be at least 160 x 160 pixels."
+          });
+        }
       }
 
       const safeHotelSlug = sanitizeStorageSegment(hotelSlug, "shared");

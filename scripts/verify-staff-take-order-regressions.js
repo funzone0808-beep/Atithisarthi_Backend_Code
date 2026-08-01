@@ -61,7 +61,7 @@ function main() {
   );
   requirePattern(
     staffScript,
-    /const STAFF_KDS_AUTO_REFRESH_INTERVAL_MS = 3 \* 1000;[\s\S]*?STAFF_STATE\.activeView === "kds"[\s\S]*?loadStaffKdsOrders\(\{ silent \}\)/m,
+    /const STAFF_KDS_AUTO_REFRESH_INTERVAL_MS = 5 \* 1000;[\s\S]*?STAFF_STATE\.activeView === "kds"[\s\S]*?loadStaffKdsOrders\(\{ silent \}\)/m,
     "active-view KDS polling without background duplicate refreshes"
   );
   requirePattern(
@@ -106,7 +106,7 @@ function main() {
   );
   requirePattern(
     staffRoute,
-    /const menuVersion = crypto[\s\S]*?Cache-Control", "private, no-cache"[\s\S]*?menuVersion,/m,
+    /const menuVersion = createMenuVersion[\s\S]*?Cache-Control", "private, no-cache"[\s\S]*?menuVersion,/m,
     "versioned authenticated menu response"
   );
   requirePattern(

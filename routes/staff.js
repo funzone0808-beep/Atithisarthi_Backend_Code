@@ -67,6 +67,14 @@ const {
   validateRequestedMenuCombos
 } = require("../utils/menu-combos");
 const {
+  buildEligibleCategoryDtos,
+  createMenuVersion,
+  fetchHotelMenuCategories,
+  filterEligibleMenuItems,
+  normalizeMenuCategoryKey,
+  resolveMenuItemDisplayImage
+} = require("../utils/menu-categories");
+const {
   buildStaffOrderingDisabledPayload,
   fetchHotelOrderingSettings,
   invalidateHotelOrderingSettings,
@@ -689,7 +697,7 @@ async function getStaffOrderHotelContext(hotelSlug) {
 async function getStaffAvailableMenuItemsById(hotelSlug, itemIds = []) {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("hotel_slug,item_id,name,price,item_type")
+    .select("hotel_slug,item_id,name,price,item_type,category")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -697,7 +705,8 @@ async function getStaffAvailableMenuItemsById(hotelSlug, itemIds = []) {
 
   if (error) throw error;
 
-  return new Map((data || []).map((item) => [String(item.item_id), item]));
+  const eligibleItems = await filterEligibleMenuItems({ supabase, hotelSlug, consumer: "staff", menuItems: data || [] });
+  return new Map(eligibleItems.map((item) => [String(item.item_id), item]));
 }
 
 async function fetchStaffRoomServiceFeatureSettings(hotelSlug = "") {
@@ -1593,6 +1602,36 @@ function buildStaffItemSalesSummary(orders = []) {
   };
 }
 
+function buildStaffCategorySalesSummary(orders = []) {
+  const categoryMap = new Map();
+  (Array.isArray(orders) ? orders : []).forEach((order) => {
+    const seenInOrder = new Set();
+    (Array.isArray(order?.items) ? order.items : []).forEach((item) => {
+      const categoryKey = String(item?.category || "uncategorized").trim() || "uncategorized";
+      const categoryName = String(item?.categoryName || item?.category || "Uncategorized").trim();
+      const entry = categoryMap.get(categoryKey) || {
+        categoryKey,
+        categoryName,
+        quantitySold: 0,
+        revenue: 0,
+        orderCount: 0
+      };
+      entry.quantitySold += getStaffItemQuantity(item);
+      entry.revenue += getStaffItemRevenue(item);
+      if (!seenInOrder.has(categoryKey)) {
+        entry.orderCount += 1;
+        seenInOrder.add(categoryKey);
+      }
+      categoryMap.set(categoryKey, entry);
+    });
+  });
+  return [...categoryMap.values()].sort((left, right) =>
+    right.revenue - left.revenue ||
+    right.quantitySold - left.quantitySold ||
+    left.categoryName.localeCompare(right.categoryName)
+  );
+}
+
 function buildStaffItemSalesReports(orders = [], starts = getStaffOperationalReportStarts()) {
   const periods = {
     today: [],
@@ -1906,6 +1945,7 @@ function buildStaffBusinessReport({ hotelSlug, orders = [], staffById = new Map(
     return status !== "cancelled" && paymentStatus !== "refunded";
   });
   const itemSales = buildStaffItemSalesSummary(revenueOrders);
+  const categorySales = buildStaffCategorySalesSummary(revenueOrders);
   const comboOrders = revenueOrders.filter((order) =>
     Array.isArray(order.items) &&
     order.items.some((item) => String(item?.itemType || "single").trim() === "combo")
@@ -1939,6 +1979,7 @@ function buildStaffBusinessReport({ hotelSlug, orders = [], staffById = new Map(
       topItems: itemSales.topItems.slice(0, STAFF_BUSINESS_REPORT_ITEM_LIMIT),
       lowItems: itemSales.lowItems.slice(0, STAFF_BUSINESS_REPORT_ITEM_LIMIT)
     },
+    categories: categorySales,
     customers: buildStaffCustomerReport(revenueOrders),
     staffPerformance: buildStaffPerformanceReport(orders, staffById),
     payments: {
@@ -2644,17 +2685,21 @@ function getStaffKdsStatusCounts(orders = []) {
   }, {});
 }
 
-function buildStaffMenuItemResponse(item = {}, comboPresentation = null) {
+function buildStaffMenuItemResponse(item = {}, comboPresentation = null, category = null) {
+  const displayImage = resolveMenuItemDisplayImage(item, category);
   return {
     id: item.item_id || "",
     name: item.name || "",
     desc: item.description || "",
     price: Number(item.price || 0),
-    image: item.image || "",
+    image: displayImage.url,
+    imageMeta: displayImage,
     alt: item.alt || item.name || "",
     badge: item.badge || (comboPresentation ? "Combo" : ""),
     tag: item.tag || "",
-    category: item.category || "others",
+    category: normalizeMenuCategoryKey(item.category),
+    categoryName: category?.name || normalizeMenuCategoryKey(item.category),
+    categorySlug: category?.slug || "",
     sortOrder: Number(item.sort_order || 0),
     itemType: comboPresentation?.itemType || item.item_type || "single",
     comboItems: comboPresentation?.comboItems || [],
@@ -2925,6 +2970,16 @@ router.get("/menu", requireStaffAuth, requireStaffFoodModule, async (req, res) =
 
     if (error) throw error;
 
+    const categoryResult = await fetchHotelMenuCategories({
+      supabase,
+      hotelSlug,
+      consumer: "staff",
+      menuItems: data || []
+    });
+    const categoryDtos = buildEligibleCategoryDtos(categoryResult.categories, data || [], { hideEmpty: true });
+    const categoryByKey = new Map(categoryDtos.map((category) => [category.key, category]));
+    const categoryOrder = new Map(categoryDtos.map((category, index) => [category.key, index]));
+
     let comboPresentationMap = new Map();
 
     try {
@@ -2940,6 +2995,7 @@ router.get("/menu", requireStaffAuth, requireStaffFoodModule, async (req, res) =
 
     const items = (data || [])
       .filter((item) => {
+        if (!categoryByKey.has(normalizeMenuCategoryKey(item.category))) return false;
         const comboPresentation = comboPresentationMap.get(item.item_id) || null;
         const isComboItem = String(item.item_type || "single").trim() === "combo";
 
@@ -2949,19 +3005,27 @@ router.get("/menu", requireStaffAuth, requireStaffFoodModule, async (req, res) =
 
         return isMenuComboPresentationCurrentlyAvailable(comboPresentation);
       })
-      .map((item) => buildStaffMenuItemResponse(item, comboPresentationMap.get(item.item_id) || null));
+      .map((item) => buildStaffMenuItemResponse(
+        item,
+        comboPresentationMap.get(item.item_id) || null,
+        categoryByKey.get(normalizeMenuCategoryKey(item.category))
+      ))
+      .sort((left, right) =>
+        Number(categoryOrder.get(left.category) || 0) - Number(categoryOrder.get(right.category) || 0) ||
+        Number(left.sortOrder || 0) - Number(right.sortOrder || 0) ||
+        String(left.id).localeCompare(String(right.id))
+      );
 
-    const menuVersion = crypto
-      .createHash("sha256")
-      .update(JSON.stringify(items))
-      .digest("hex")
-      .slice(0, 16);
+    const visibleCategories = categoryDtos.filter((category) => items.some((item) => item.category === category.key));
+    const menuVersion = createMenuVersion({ categories: visibleCategories, items });
     res.set("Cache-Control", "private, no-cache");
     res.json({
       success: true,
       hotelSlug,
       count: items.length,
       menuVersion,
+      categorySource: categoryResult.source,
+      categories: visibleCategories,
       items,
       menu: groupStaffMenuItemsByCategory(items)
     });

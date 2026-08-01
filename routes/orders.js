@@ -22,6 +22,7 @@ const {
   buildComboSummaryLine
 } = require("../utils/order-item-snapshots");
 const { validateRequestedMenuCombos } = require("../utils/menu-combos");
+const { filterEligibleMenuItems } = require("../utils/menu-categories");
 const { resolveTableForOrder } = require("../utils/restaurant-tables");
 
 // ✅ Added imports
@@ -252,10 +253,10 @@ async function getHotelPricingContext(hotelSlug) {
   return { hotel: data };
 }
 
-async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
+async function getAvailableMenuItemsById(hotelSlug, itemIds = [], consumer = "website") {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("hotel_slug,item_id,name,price,item_type")
+    .select("hotel_slug,item_id,name,price,item_type,category")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -263,7 +264,8 @@ async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
 
   if (error) throw error;
 
-  return new Map((data || []).map((item) => [String(item.item_id), item]));
+  const eligibleItems = await filterEligibleMenuItems({ supabase, hotelSlug, consumer, menuItems: data || [] });
+  return new Map(eligibleItems.map((item) => [String(item.item_id), item]));
 }
 
 async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod, orderContext }) {
@@ -275,7 +277,11 @@ async function calculateVerifiedOrderPricing({ hotelSlug, items, paymentMethod, 
 
   const hotel = pricingContext.hotel;
   const uniqueItemIds = [...new Set((items || []).map((item) => String(item.id || "")))].filter(Boolean);
-  const menuItemsById = await getAvailableMenuItemsById(hotel.hotel_slug, uniqueItemIds);
+  const menuItemsById = await getAvailableMenuItemsById(
+    hotel.hotel_slug,
+    uniqueItemIds,
+    String(orderContext?.orderSource || "").toLowerCase() === "qr" ? "qr" : "website"
+  );
   const missingItems = uniqueItemIds.filter((itemId) => !menuItemsById.has(itemId));
 
   if (missingItems.length) {

@@ -176,7 +176,7 @@ const hotelSchema = z.object({
 
 const menuItemSchema = z.object({
   hotelSlug: z.string().trim().min(2).max(120),
-  category: z.string().trim().min(2).max(50),
+  category: z.string().trim().min(1).max(120),
   itemId: z.string().trim().min(1).max(120),
   name: z.string().trim().min(2).max(150),
   description: z.string().max(2000).optional().nullable(),
@@ -187,6 +187,40 @@ const menuItemSchema = z.object({
   tag: z.string().trim().max(100).optional().nullable(),
   isAvailable: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional()
+});
+
+const safeOptionalImageUrlSchema = z
+  .union([z.string().trim().max(2000), z.literal(""), z.null()])
+  .optional()
+  .refine((value) => {
+    const candidate = String(value || "").trim();
+    if (!candidate) return true;
+    if (candidate.startsWith("/") || candidate.startsWith("./") || candidate.startsWith("../")) {
+      return !candidate.startsWith("//") && !/[<>"'`]/.test(candidate);
+    }
+    try {
+      return ["http:", "https:"].includes(new URL(candidate).protocol);
+    } catch {
+      return false;
+    }
+  }, "Image URL must be a safe local, HTTP, or HTTPS URL");
+
+const menuCategorySchema = z.object({
+  hotelSlug: z.string().trim().min(2).max(120),
+  categoryKey: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1).max(160),
+  slug: z.string().trim().min(1).max(140).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+  description: z.string().trim().max(1000).optional().nullable(),
+  displayOrder: z.number().int().min(0).max(100000).optional(),
+  isActive: z.boolean().optional(),
+  isPublished: z.boolean().optional(),
+  staffEnabled: z.boolean().optional(),
+  websiteEnabled: z.boolean().optional(),
+  qrEnabled: z.boolean().optional(),
+  defaultImageUrl: safeOptionalImageUrlSchema,
+  defaultThumbnailUrl: safeOptionalImageUrlSchema,
+  imageStoragePath: z.string().trim().max(500).optional().nullable(),
+  imageAltText: z.string().trim().max(300).optional().nullable()
 });
 
 const comboDateFieldSchema = z
@@ -603,6 +637,7 @@ const hotelDomainSettingsSchema = z.object({
   isActive: z.boolean().optional()
 });
 const partialMenuItemSchema = menuItemSchema.partial();
+const partialMenuCategorySchema = menuCategorySchema.partial().omit({ hotelSlug: true, categoryKey: true });
 const partialGalleryItemSchema = galleryItemSchema.partial();
 const partialTestimonialSchema = testimonialSchema.partial();
 const partialPopupNotificationSchema = popupNotificationBaseSchema
@@ -624,6 +659,8 @@ module.exports = {
   partialPopupNotificationSchema,
   menuItemSchema,
   partialMenuItemSchema,
+  menuCategorySchema,
+  partialMenuCategorySchema,
   comboMenuItemSchema,
   partialComboMenuItemSchema,
   hotelProfileSchema,

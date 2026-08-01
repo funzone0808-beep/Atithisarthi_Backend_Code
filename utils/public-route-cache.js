@@ -51,11 +51,17 @@ function invalidatePublicTestimonialsCache(hotelSlug = "") {
 
   return publicRouteCache.delete(`testimonials:${normalizedHotelSlug}`);
 }
+function invalidatePublicMenuCache(hotelSlug = "") {
+  const normalizedHotelSlug = String(hotelSlug || "").trim();
+  if (!normalizedHotelSlug) return false;
+  return publicRouteCache.delete(`menu:${normalizedHotelSlug}`);
+}
 
 module.exports = {
   PUBLIC_ROUTE_CACHE_TTL_MS,
   getCachedPublicRoutePayload,
   invalidateCachedPublicRoutePrefix,
+  invalidatePublicMenuCache,
   invalidatePublicRoomsCache,
   invalidatePublicTestimonialsCache,
   setCachedPublicRoutePayload

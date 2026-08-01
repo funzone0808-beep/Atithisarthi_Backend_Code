@@ -16,6 +16,7 @@ const {
   buildComboSummaryLine
 } = require("../utils/order-item-snapshots");
 const { validateRequestedMenuCombos } = require("../utils/menu-combos");
+const { filterEligibleMenuItems } = require("../utils/menu-categories");
 const { requireHotelFeature } = require("../middleware/require-hotel-feature");
 
 const router = express.Router();
@@ -284,7 +285,7 @@ async function getHotelPricingContext(hotelSlug) {
 async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
   const { data, error } = await supabase
     .from("menu_items")
-    .select("hotel_slug,item_id,name,price,item_type")
+    .select("hotel_slug,item_id,name,price,item_type,category")
     .eq("hotel_slug", hotelSlug)
     .eq("is_available", true)
     .eq("is_archived", false)
@@ -292,7 +293,8 @@ async function getAvailableMenuItemsById(hotelSlug, itemIds = []) {
 
   if (error) throw error;
 
-  return new Map((data || []).map((item) => [String(item.item_id), item]));
+  const eligibleItems = await filterEligibleMenuItems({ supabase, hotelSlug, consumer: "website", menuItems: data || [] });
+  return new Map(eligibleItems.map((item) => [String(item.item_id), item]));
 }
 
 async function calculateVerifiedAddonPricing({ hotelSlug, items, paymentMethod }) {
