@@ -74,6 +74,7 @@ function verifyScale() {
   const scenarios = [
     [5, 25],
     [10, 100],
+    [25, 300],
     [20, 250],
     [30, 500],
     [50, 1000]
@@ -119,6 +120,15 @@ function verifySourceContracts() {
   assert.ok(mainJs.includes("data-category-fallback-src"));
   assert.ok(mainJs.includes("data-global-fallback-src"));
   assert.ok(mainJs.includes("data-format-fallback-src"));
+  assert.ok(mainJs.includes("isFrontendWorkspacePreview"));
+  assert.ok(mainJs.includes('grid.insertAdjacentHTML("beforeend", cardsMarkup)'));
+  assert.ok(mainJs.includes('loading="${priority ? "eager" : "lazy"}"'));
+  assert.ok(mainJs.includes("refreshRenderedMenuItem(itemId)"));
+  assert.ok(mainJs.includes("window.updateRenderedMenuItem"));
+  assert.ok(mainJs.includes("data-menu-item-id"));
+  assert.ok(indexHtml.includes('href="img/default-food.v1.webp"'));
+  assert.ok(menuHtml.includes('href="img/default-food.v1.webp"'));
+  assert.ok(read("frontend/css/style.css").includes("content-visibility: auto"));
   assert.ok(staffJs.includes("tableOrderMenuCategories"));
   assert.ok(publicRoute.includes("categories: visibleCategories"));
   assert.ok(publicRoute.includes("hideEmpty: true"));
