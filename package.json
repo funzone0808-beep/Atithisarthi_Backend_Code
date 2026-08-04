@@ -34,6 +34,7 @@
     "verify:room-negotiated-rate-live": "node scripts/verify-room-negotiated-rate-live.js",
     "verify:room-double-booking-safety": "node scripts/verify-room-double-booking-safety.js",
     "verify:room-booking-permissions": "node scripts/verify-room-booking-action-permissions.js",
+    "verify:room-booking-progressive-detail": "node scripts/verify-room-booking-progressive-detail.js",
     "verify:room-booking-gap-audit": "node scripts/verify-room-booking-production-gap-audit.js",
     "verify:room-checkout": "node scripts/verify-room-checkout-summary.js",
     "verify:room-checkout-readiness": "node scripts/verify-room-checkout-readiness.js",

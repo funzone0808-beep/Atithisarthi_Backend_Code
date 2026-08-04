@@ -54,12 +54,21 @@ function main() {
     "staff room booking payment"
   );
 
+  assertRouteOrder(
+    staffRoute,
+    /router\.get\(\s*"\/bookings\/:id\/payments",\s*requireStaffManagerAccess,\s*async/m,
+    "staff room booking payment history"
+  );
   assertIncludes(staffFrontend, "function isStaffManagerSession", "staff frontend role helper");
-  assertIncludes(staffFrontend, "const canUpdateStatus = isStaffManagerSession();", "staff room booking card");
-  assertIncludes(staffFrontend, '${canUpdateStatus ? buildStaffRoomBookingStatusControls(booking) : ""}', "staff status controls gate");
-  assertIncludes(staffFrontend, '${canUpdateStatus && hasFinancialFields ? buildStaffRoomBookingPaymentControls(booking) : ""}', "staff payment controls gate");
-  assertIncludes(staffFrontend, '${canUpdateStatus && hasFinancialFields ? buildStaffRoomCheckoutSummaryControls(booking) : ""}', "staff checkout controls gate");
-  assertIncludes(staffFrontend, 'error.code = data.code || "";', "staff fetch permission code preservation");
+  assertIncludes(
+    staffFrontend,
+    "const canManage = permissions.canManageBooking === true && isStaffManagerSession();",
+    "staff booking detail role gate"
+  );
+  assertIncludes(staffFrontend, "if (canManage) {", "staff booking action section gate");
+  assertIncludes(staffFrontend, "buildStaffRoomBookingStatusControls(booking)", "staff status controls gate");
+  assertIncludes(staffFrontend, "buildStaffRoomBookingPaymentControls(booking)", "staff payment controls gate");
+  assertIncludes(staffFrontend, "buildStaffRoomCheckoutSummaryControls(booking)", "staff checkout controls gate");  assertIncludes(staffFrontend, 'error.code = data.code || "";', "staff fetch permission code preservation");
 
   assert.match(
     packageJson,

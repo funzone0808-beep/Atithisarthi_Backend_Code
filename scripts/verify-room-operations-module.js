@@ -58,7 +58,7 @@ function main() {
   requireText(route, "applyActiveBookingOverlapFilter", "Room Operations shared overlap logic");
   requireText(route, 'select("id,room_id,check_in_date,check_out_date,booking_status,payment_status,booking_source,created_at,updated_at")', "Room Operations tile privacy");
   requireText(route, 'router.get("/bookings/:id"', "Room Operations lazy detail route");
-  requireText(route, "buildStaffBookingResponse(booking, canViewFinancial)", "Room Operations financial shaping");
+  requireText(route, "buildStaffBookingDetailResponse(booking, canViewFinancial)", "Room Operations field-level detail shaping");
   requireText(route, "STAFF_BOOKING_STATUS_TRANSITIONS", "Room Operations status transition guard");
   requireText(route, "ROOM_NOT_READY_FOR_CHECK_IN", "Room Operations check-in readiness guard");
   requireText(route, "hasOtherBlockingBooking", "Room Operations confirmation conflict guard");

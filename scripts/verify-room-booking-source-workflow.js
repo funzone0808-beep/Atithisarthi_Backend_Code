@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 const assert = require("assert").strict;
 const fs = require("fs");
@@ -60,7 +60,9 @@ function verifySourceContracts() {
   requireText(adminRoute, 'bookingSource = "admin"', "admin manual source default");
   requireText(staffRoute, '.eq("hotel_slug", hotelSlug)', "hotel isolation");
   requireText(staffRoute, 'getRoomBookingSourceFilterValues(source)', "authoritative source filtering");
-  requireText(staffRoute, '.select("*", { count: "exact" })', "exact pagination counts");
+  requireText(staffRoute, '.select(ROOM_BOOKING_SUMMARY_SELECT, { count: "exact" })', "exact pagination counts");
+  requireText(staffRoute, 'buildStaffBookingSummary(booking, canViewFinancial)', "summary DTO mapping");
+  requireText(staffRoute, 'contract: "room-booking-summary-v1"', "summary API contract");
   requireText(staffRoute, '.range((page - 1) * limit, page * limit - 1)', "server pagination");
   requireText(staffRoute, 'ROOM_FINANCIAL_FILTER_MANAGER_REQUIRED', "financial filter permission");
   requireText(notificationRoute, 'canUseRooms: isHotelFeatureEnabled(featureConfig, "rooms")', "notification Rooms permission");

@@ -1,4 +1,4 @@
-﻿const { z } = require("zod");
+const { z } = require("zod");
 
 const hotelSlugSchema = z.string().trim().min(2).max(120);
 const textSchema = (max = 2000) => z.string().trim().max(max).optional().nullable();
@@ -228,7 +228,7 @@ const staffRoomBookingListQuerySchema = z.object({
   fromDate: dateFieldSchema.optional(),
   toDate: dateFieldSchema.optional(),
   search: z.string().trim().max(80)
-    .regex(/^[\p{L}\p{N}\s@+._'-]*$/u, "Search contains unsupported characters")
+    .regex(/^[\p{L}\p{N}\s@+._'#-]*$/u, "Search contains unsupported characters")
     .optional(),
   sort: z.enum([
     "created_desc",
@@ -239,7 +239,7 @@ const staffRoomBookingListQuerySchema = z.object({
     "payment_status"
   ]).optional().default("created_desc"),
   page: z.coerce.number().int().min(1).max(10000).optional().default(1),
-  limit: z.coerce.number().int().min(1).max(100).optional().default(50)
+  limit: z.coerce.number().int().min(15).max(50).optional().default(25)
 });
 
 const publicRoomAvailabilityQuerySchema = z

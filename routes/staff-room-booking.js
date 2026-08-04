@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const { ZodError } = require("zod");
 const {
   requireStaffAuth,
@@ -259,6 +259,189 @@ function buildStaffBookingResponse(booking = {}, canViewFinancial = false) {
   }
 
   return response;
+}
+
+const ROOM_BOOKING_SUMMARY_SELECT = [
+  "id",
+  "room_id",
+  "guest_name",
+  "check_in_date",
+  "check_out_date",
+  "total_nights",
+  "adults",
+  "children",
+  "booking_status",
+  "booking_source",
+  "created_at",
+  "updated_at",
+  "payment_status",
+  "advance_paid",
+  "balance_amount",
+  "rooms!room_bookings_room_id_fkey!inner(id,hotel_slug,room_number,title,room_type_id,floor)"
+].join(",");
+
+function buildStaffBookingDetailResponse(booking = {}, canViewFinancial = false) {
+  const response = {
+    id: booking.id,
+    room_id: booking.room_id,
+    previous_room_id: booking.previous_room_id || null,
+    guest_name: booking.guest_name,
+    guest_phone: booking.guest_phone,
+    guest_email: booking.guest_email,
+    check_in_date: booking.check_in_date,
+    check_out_date: booking.check_out_date,
+    adults: Number(booking.adults || 0),
+    children: Number(booking.children || 0),
+    total_nights: Number(booking.total_nights || 0),
+    booking_status: booking.booking_status,
+    booking_source: booking.booking_source,
+    booking_source_group: getRoomBookingSourceGroup(booking.booking_source),
+    booking_source_label: getRoomBookingSourceLabel(booking.booking_source),
+    notes: booking.notes || "",
+    checked_in_at: booking.checked_in_at || null,
+    checked_out_at: booking.checked_out_at || null,
+    cancelled_at: booking.cancelled_at || null,
+    created_at: booking.created_at,
+    updated_at: booking.updated_at,
+    version: booking.updated_at || booking.created_at || ""
+  };
+
+  if (canViewFinancial) {
+    Object.assign(response, {
+      guest_id_proof: booking.guest_id_proof || "",
+      guest_company_name: booking.guest_company_name || "",
+      guest_gstin: booking.guest_gstin || "",
+      guest_place_of_supply: booking.guest_place_of_supply || "",
+      room_price: Number(booking.room_price || 0),
+      tax_amount: Number(booking.tax_amount || 0),
+      discount_amount: Number(booking.discount_amount || 0),
+      total_amount: Number(booking.total_amount || 0),
+      advance_paid: Number(booking.advance_paid || 0),
+      balance_amount: Number(booking.balance_amount || 0),
+      payment_status: booking.payment_status,
+      rate_plan_id: booking.rate_plan_id || null,
+      pricing_snapshot: booking.pricing_snapshot || {},
+      tax_rule_id: booking.tax_rule_id || null,
+      tax_snapshot: booking.tax_snapshot || {},
+      pricing_version: booking.pricing_version || null
+    });
+  }
+
+  return response;
+}
+
+function buildStaffRoomDetailResponse(room = {}, canViewFinancial = false) {
+  const response = {
+    id: room.id,
+    room_number: room.room_number,
+    title: room.title,
+    room_type_id: room.room_type_id || null,
+    floor: room.floor || "",
+    floor_id: room.floor_id || null,
+    capacity: room.capacity || room.max_adults || null,
+    bed_type: room.bed_type || "",
+    status: room.status,
+    is_active: room.is_active !== false
+  };
+
+  if (canViewFinancial) {
+    response.base_price = room.base_price;
+    response.discount_price = room.discount_price;
+    response.tax_percent = room.tax_percent;
+  }
+
+  return response;
+}
+
+function getRoomBookingActionRequired(booking = {}, canViewFinancial = false) {
+  const status = normalizeText(booking.booking_status, 40).toLowerCase() || "pending";
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (status === "pending") return "Confirm booking";
+  if (status === "confirmed" && booking.check_in_date && booking.check_in_date <= today) {
+    return "Check-in due";
+  }
+  if (status === "checked_in" && booking.check_out_date && booking.check_out_date <= today) {
+    return "Checkout due";
+  }
+  if (canViewFinancial && Number(booking.balance_amount || 0) > 0) return "Collect balance";
+  return "";
+}
+
+function buildStaffBookingSummary(booking = {}, canViewFinancial = false) {
+  const room = booking.rooms && typeof booking.rooms === "object" ? booking.rooms : {};
+  const actionRequired = getRoomBookingActionRequired(booking, canViewFinancial);
+  const summary = {
+    id: booking.id,
+    booking_reference: "#" + booking.id,
+    booking_source: booking.booking_source,
+    booking_source_group: getRoomBookingSourceGroup(booking.booking_source),
+    booking_source_label: getRoomBookingSourceLabel(booking.booking_source),
+    guest_name: booking.guest_name,
+    check_in_date: booking.check_in_date,
+    check_out_date: booking.check_out_date,
+    total_nights: Number(booking.total_nights || getTotalNights(booking.check_in_date, booking.check_out_date) || 0),
+    adults: Number(booking.adults || 0),
+    children: Number(booking.children || 0),
+    room_id: booking.room_id,
+    room_number: room.room_number || "",
+    room_type: room.title || room.room_type_id || "",
+    room_floor: room.floor || "",
+    booking_status: booking.booking_status,
+    created_at: booking.created_at,
+    updated_at: booking.updated_at,
+    version: booking.updated_at || booking.created_at || "",
+    action_required: actionRequired || null
+  };
+
+  if (canViewFinancial) {
+    summary.payment_status = booking.payment_status;
+    summary.advance_paid = Number(booking.advance_paid || 0);
+    summary.balance_amount = Number(booking.balance_amount || 0);
+  }
+
+  return summary;
+}
+
+function buildRoomBookingActivity({ booking = {}, payments = [], refunds = [], auditRows = [] } = {}) {
+  const activity = [];
+  const add = (type, label, timestamp, extra = {}) => {
+    if (!timestamp) return;
+    activity.push({ type, label, timestamp, ...extra });
+  };
+
+  add("booking_created", "Booking created", booking.created_at, {
+    actorRole: booking.created_by_role || "",
+    source: getRoomBookingSourceLabel(booking.booking_source)
+  });
+  add("checked_in", "Guest checked in", booking.checked_in_at);
+  add("checked_out", "Guest checked out", booking.checked_out_at);
+  add("cancelled", "Booking cancelled", booking.cancelled_at);
+
+  payments.forEach((payment) => add(
+    "payment",
+    "Payment " + (normalizeText(payment.payment_status, 40) || "recorded"),
+    payment.paid_at || payment.created_at,
+    { amount: Number(payment.amount || 0), paymentMethod: payment.payment_method || "" }
+  ));
+  refunds.forEach((refund) => add(
+    "refund",
+    "Refund " + (normalizeText(refund.status, 40) || "recorded"),
+    refund.created_at,
+    { amount: Number(refund.amount || 0), paymentMethod: refund.payment_method || "" }
+  ));
+  auditRows.forEach((row) => {
+    const action = normalizeText(row.action, 80) || "booking_updated";
+    const label = action
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (character) => character.toUpperCase());
+    add(action, label, row.created_at, {
+      actorRole: normalizeText(row.actor_role, 80),
+      reason: normalizeText(row.reason, 500)
+    });
+  });
+
+  return activity.sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp));
 }
 
 async function fetchFeatureSettings(hotelSlug = "") {
@@ -896,7 +1079,7 @@ router.get("/bookings", async (req, res) => {
       search,
       sort = "created_desc",
       page = 1,
-      limit = 50
+      limit = 25
     } = parsedQuery.values;
     const canViewFinancial = isStaffManager(req);
     if ((paymentStatus || sort === "payment_status") && !canViewFinancial) {
@@ -909,17 +1092,36 @@ router.get("/bookings", async (req, res) => {
 
     let query = supabase
       .from("room_bookings")
-      .select("*", { count: "exact" })
-      .eq("hotel_slug", hotelSlug);
+      .select(ROOM_BOOKING_SUMMARY_SELECT, { count: "exact" })
+      .eq("hotel_slug", hotelSlug)
+      .eq("rooms.hotel_slug", hotelSlug);
 
     if (status) query = query.eq("booking_status", status);
     if (paymentStatus) query = query.eq("payment_status", paymentStatus);
     if (fromDate) query = query.gte("check_in_date", fromDate);
     if (toDate) query = query.lte("check_in_date", toDate);
     if (search) {
-      query = query.or(
-        `guest_name.ilike.%${search}%,guest_phone.ilike.%${search}%,guest_email.ilike.%${search}%`
-      );
+      const searchFilters = [
+        "guest_name.ilike.%" + search + "%",
+        "guest_phone.ilike.%" + search + "%",
+        "guest_email.ilike.%" + search + "%"
+      ];
+      const roomSearchResult = await supabase
+        .from("rooms")
+        .select("id")
+        .eq("hotel_slug", hotelSlug)
+        .or("room_number.ilike.%" + search + "%,title.ilike.%" + search + "%")
+        .limit(100);
+      if (roomSearchResult.error) throw roomSearchResult.error;
+      const matchingRoomIds = (roomSearchResult.data || [])
+        .map((room) => Number(room.id))
+        .filter((roomId) => Number.isSafeInteger(roomId) && roomId > 0);
+      if (matchingRoomIds.length) {
+        searchFilters.push("room_id.in.(" + matchingRoomIds.join(",") + ")");
+      }
+      const referenceSearch = String(search).replace(/^#/, "");
+      if (/^\d+$/.test(referenceSearch)) searchFilters.unshift("id.eq." + referenceSearch);
+      query = query.or(searchFilters.join(","));
     }
     if (source === "legacy") {
       const knownSources = [
@@ -974,7 +1176,8 @@ router.get("/bookings", async (req, res) => {
         hasPrevious: page > 1,
         hasNext: page < totalPages
       },
-      bookings: (data || []).map((booking) => buildStaffBookingResponse(booking, canViewFinancial))
+      contract: "room-booking-summary-v1",
+      bookings: (data || []).map((booking) => buildStaffBookingSummary(booking, canViewFinancial))
     });
   } catch (error) {
     console.error("Staff room bookings fetch error:", error);
@@ -1498,12 +1701,59 @@ router.get("/bookings/:id", async (req, res) => {
     if (roomError) throw roomError;
 
     const canViewFinancial = isStaffManager(req);
+    let payments = [];
+    let refunds = [];
+    let auditRows = [];
+    if (canViewFinancial) {
+      const [paymentResult, refundResult, auditResult] = await Promise.all([
+        supabase
+          .from("room_booking_payments")
+          .select("id,amount,payment_method,payment_status,transaction_id,notes,paid_at,created_at")
+          .eq("hotel_slug", hotelSlug)
+          .eq("booking_id", booking.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("room_booking_refunds")
+          .select("id,amount,payment_method,status,transaction_id,reason,created_at")
+          .eq("hotel_slug", hotelSlug)
+          .eq("booking_id", booking.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("room_operation_audit")
+          .select("id,actor_role,action,reason,created_at")
+          .eq("hotel_slug", hotelSlug)
+          .eq("target_type", "room_booking")
+          .eq("target_id", String(booking.id))
+          .order("created_at", { ascending: false })
+          .limit(100)
+      ]);
+      const optionalResults = [paymentResult, refundResult, auditResult];
+      const fatalResult = optionalResults.find(
+        (result) => result.error && !isMissingRoomBookingSchemaError(result.error)
+      );
+      if (fatalResult?.error) throw fatalResult.error;
+      payments = paymentResult.error ? [] : paymentResult.data || [];
+      refunds = refundResult.error ? [] : refundResult.data || [];
+      auditRows = auditResult.error ? [] : auditResult.data || [];
+    }
+    res.set("Cache-Control", "private, no-store");
     res.json({
       success: true,
       hotelSlug,
+      contract: "room-booking-detail-v1",
       financialsVisible: canViewFinancial,
-      room: room ? buildStaffRoomResponse(room, canViewFinancial) : null,
-      booking: buildStaffBookingResponse(booking, canViewFinancial)
+      permissions: {
+        canViewFinancials: canViewFinancial,
+        canManageBooking: canViewFinancial,
+        canViewGuestContact: true,
+        canViewIdentityProof: canViewFinancial
+      },
+      version: booking.updated_at || booking.created_at || "",
+      room: room ? buildStaffRoomDetailResponse(room, canViewFinancial) : null,
+      booking: buildStaffBookingDetailResponse(booking, canViewFinancial),
+      payments,
+      refunds,
+      activity: buildRoomBookingActivity({ booking, payments, refunds, auditRows })
     });
   } catch (error) {
     if (isMissingRoomBookingSchemaError(error)) {
@@ -1616,7 +1866,7 @@ router.post(
   staffRoomCombinedCheckoutHandler
 );
 
-router.get("/bookings/:id/payments", async (req, res) => {
+router.get("/bookings/:id/payments", requireStaffManagerAccess, async (req, res) => {
   try {
     const hotelSlug = normalizeText(req.staffHotelSlug, 120);
     const bookingId = normalizeText(req.params.id, 80);
