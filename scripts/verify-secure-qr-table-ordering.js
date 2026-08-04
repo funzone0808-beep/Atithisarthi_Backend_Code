@@ -177,7 +177,7 @@ function verifySourceContracts() {
   includes(staffUi, "data-staff-qr-correction");
   includes(observability, "[redacted]");
   assert.ok(!publicRoute.includes("createNotificationEventSafely"), "QR route must not bypass durable outbox delivery");
-  includes(read("frontend/js/staff-orders.js"), "3 * 1000");
+  includes(read("frontend/js/staff-orders.js"), "STAFF_SLOW_REQUEST_WARNING_MS = 3000");
 }
 
 function verifySyntax() {

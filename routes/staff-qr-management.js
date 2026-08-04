@@ -1,5 +1,6 @@
 const express = require("express");
 const { supabase } = require("../utils/supabase");
+const logger = require("../utils/logger");
 const { requireStaffAuth, requireStaffManagerAccess } = require("../middleware/require-staff-auth");
 const { requireHotelFeature, resolveStaffHotelSlug } = require("../middleware/require-hotel-feature");
 const { tableResponse } = require("../utils/restaurant-tables");
@@ -113,7 +114,12 @@ async function returnPrintableToken(req, res, { rotate = false } = {}) {
   }
   let record = active.data;
   let rawToken = record ? decryptQrToken(record.token_ciphertext) : "";
-  if (!record || !rawToken) {
+  if (record && !rawToken) {
+    const recoveryError = new Error("The active QR link cannot be recovered with the current server key.");
+    recoveryError.code = "QR_TOKEN_ROTATION_REQUIRED";
+    throw recoveryError;
+  }
+  if (!record) {
     const created = await createToken({ hotelSlug: context.hotelSlug, tableId: context.row.id, req });
     record = created.record;
     rawToken = created.rawToken;
@@ -142,13 +148,50 @@ router.get("/tables/:id/qr", requireStaffAuth, requireStaffManagerAccess, requir
 });
 
 router.post("/tables/:id/qr", requireStaffAuth, requireStaffManagerAccess, requireStaffFoodModule, async (req, res) => {
-  try { return await returnPrintableToken(req, res); }
-  catch (error) { return res.status(500).json({ success: false, message: "Failed to generate the secure table QR link." }); }
+  try {
+    return await returnPrintableToken(req, res);
+  } catch (error) {
+    logger.error("Staff table QR generation failed", {
+      requestId: req.requestId,
+      hotelSlug: req.staffHotelSlug,
+      tableId: req.params.id,
+      code: error.code || "",
+      message: error.message
+    });
+    if (error.code === "QR_TOKEN_ROTATION_REQUIRED") {
+      return res.status(409).json({
+        success: false,
+        code: "QR_TOKEN_ROTATION_REQUIRED",
+        message: "This saved QR link was protected with an earlier server key. Rotate QR once to create and copy a new secure link."
+      });
+    }
+    return res.status(isMissingSecureQrSchema(error) ? 503 : 500).json({
+      success: false,
+      message: isMissingSecureQrSchema(error)
+        ? "Apply the secure QR database migration first."
+        : "Failed to generate the secure table QR link."
+    });
+  }
 });
 
 router.post("/tables/:id/qr/rotate", requireStaffAuth, requireStaffManagerAccess, requireStaffFoodModule, async (req, res) => {
-  try { return await returnPrintableToken(req, res, { rotate: true }); }
-  catch (error) { return res.status(500).json({ success: false, message: "Failed to rotate the secure table QR link." }); }
+  try {
+    return await returnPrintableToken(req, res, { rotate: true });
+  } catch (error) {
+    logger.error("Staff table QR rotation failed", {
+      requestId: req.requestId,
+      hotelSlug: req.staffHotelSlug,
+      tableId: req.params.id,
+      code: error.code || "",
+      message: error.message
+    });
+    return res.status(isMissingSecureQrSchema(error) ? 503 : 500).json({
+      success: false,
+      message: isMissingSecureQrSchema(error)
+        ? "Apply the secure QR database migration first."
+        : "Failed to rotate the secure table QR link."
+    });
+  }
 });
 
 router.post("/tables/:id/qr/revoke", requireStaffAuth, requireStaffManagerAccess, requireStaffFoodModule, async (req, res) => {

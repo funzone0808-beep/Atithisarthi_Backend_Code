@@ -11,6 +11,7 @@ const migration = read("scripts/create-restaurant-table-master.sql");
 const guard = read("scripts/upgrade-restaurant-table-order-guard.sql");
 const resolver = read("utils/restaurant-tables.js");
 const tableRoutes = read("routes/staff-tables.js");
+const staffQrManagement = read("routes/staff-qr-management.js");
 const staffRoutes = read("routes/staff.js");
 const publicOrders = read("routes/orders.js");
 const payments = read("routes/payments.js");
@@ -50,5 +51,19 @@ assertIncludes(staffUi, "selectAvailableRestaurantTable", "available table flow"
 assertIncludes(staffUi, "selectedRestaurantTableId", "locked table context");
 assertIncludes(staffUi, 'showStaffTakeOrderSubview("tables", { focus: false })', "same-page post-create flow");
 assertIncludes(staffUi, "loadStaffTableActivity({ silent: true })", "AJAX floor mutation refresh");
+assertIncludes(staffUi, "async function copyRestaurantTableQrLink", "table QR clipboard helper");
+assertIncludes(staffUi, "window.prompt(promptTitle, link)", "table QR manual copy fallback");
+assertIncludes(
+  staffUi,
+  'async function saveTableMasterEnforcement() {\n  const enabled',
+  "table enforcement function boundary"
+);
+assertIncludes(staffUi, "async function rotateRestaurantTableQr", "table QR rotation handler");
+assertIncludes(staffUi, "QR_TOKEN_ROTATION_REQUIRED", "table QR key-change recovery prompt");
+assertIncludes(staffUi, "{ skipConfirmation: true }", "confirmed QR rotation recovery");
+assertIncludes(staffUi, "async function revokeRestaurantTableQr", "table QR revocation handler");
+assertIncludes(staffQrManagement, 'recoveryError.code = "QR_TOKEN_ROTATION_REQUIRED"', "secure QR key-change detection");
+assertIncludes(staffQrManagement, 'res.status(409).json({', "secure QR controlled recovery response");
+assertIncludes(staffQrManagement, 'logger.error("Staff table QR generation failed"', "secure QR failure observability");
 
 console.log("Restaurant Table Master release verification passed.");
