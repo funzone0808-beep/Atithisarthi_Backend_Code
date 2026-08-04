@@ -4,6 +4,7 @@ const logger = require("../utils/logger");
 const { requireStaffAuth, requireStaffManagerAccess } = require("../middleware/require-staff-auth");
 const { requireHotelFeature, resolveStaffHotelSlug } = require("../middleware/require-hotel-feature");
 const { tableResponse } = require("../utils/restaurant-tables");
+const { fetchPublicHotelAccess } = require("../utils/public-hotel-access");
 const {
   decryptQrToken,
   encryptQrToken,
@@ -125,11 +126,12 @@ async function returnPrintableToken(req, res, { rotate = false } = {}) {
     rawToken = created.rawToken;
     await recordQrManagementAudit({ hotelSlug: context.hotelSlug, tableId: context.row.id, tokenId: record.id, eventType: rotate ? "QR_TOKEN_REGENERATED" : "QR_TOKEN_CREATED", req });
   }
+  const hotelAccess = await fetchPublicHotelAccess(context.hotelSlug);
   return res.json({
     success: true,
     table: context.table,
     token: tokenStatusResponse(record),
-    url: getCanonicalQrUrl(rawToken),
+    url: getCanonicalQrUrl(rawToken, hotelAccess?.primary_domain),
     requiresReprint: rotate
   });
 }

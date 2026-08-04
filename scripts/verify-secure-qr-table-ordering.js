@@ -15,6 +15,7 @@ const {
   generateCsrfToken,
   generateCustomerSessionToken,
   generateOpaqueQrToken,
+  getCanonicalQrUrl,
   hashSecret
 } = require("../utils/secure-qr");
 const { secureQrEditSchema, secureQrOrderSchema } = require("../validators/secure-qr");
@@ -38,6 +39,17 @@ function verifyCryptoAndContracts() {
     assert.ok(!encrypted.includes(token), "encrypted printable token must not contain raw token");
     assert.equal(decryptQrToken(encrypted), token, "encrypted printable token must round-trip");
   }
+  const canonicalToken = "q1_" + "a".repeat(43);
+  assert.equal(
+    getCanonicalQrUrl(canonicalToken, "hotelsairaj.servehotels.xyz"),
+    "https://hotelsairaj.servehotels.xyz/menu?q=" + canonicalToken,
+    "secure QR links must use the hotel primary domain and clean /menu path"
+  );
+  assert.equal(
+    getCanonicalQrUrl(canonicalToken, "https://hotelsairaj.servehotels.xyz/ignored"),
+    "https://hotelsairaj.servehotels.xyz/menu?q=" + canonicalToken,
+    "secure QR domain overrides must be reduced to a safe HTTP origin"
+  );
   assert.notEqual(generateCustomerSessionToken(), generateCustomerSessionToken());
   assert.notEqual(generateCsrfToken(), generateCsrfToken());
 

@@ -65,5 +65,7 @@ assertIncludes(staffUi, "async function revokeRestaurantTableQr", "table QR revo
 assertIncludes(staffQrManagement, 'recoveryError.code = "QR_TOKEN_ROTATION_REQUIRED"', "secure QR key-change detection");
 assertIncludes(staffQrManagement, 'res.status(409).json({', "secure QR controlled recovery response");
 assertIncludes(staffQrManagement, 'logger.error("Staff table QR generation failed"', "secure QR failure observability");
+assertIncludes(staffQrManagement, "fetchPublicHotelAccess", "hotel primary-domain lookup");
+assertIncludes(staffQrManagement, "getCanonicalQrUrl(rawToken, hotelAccess?.primary_domain)", "tenant-specific QR URL");
 
 console.log("Restaurant Table Master release verification passed.");

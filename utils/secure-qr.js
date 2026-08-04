@@ -94,14 +94,31 @@ function getQrSessionCookieOptions() {
   };
 }
 
-function getCanonicalQrUrl(rawToken = "") {
-  const frontendBase = String(env.frontendUrl || process.env.PUBLIC_FRONTEND_URL || "")
-    .split(",")[0]
-    .trim()
-    .replace(/\/+$/, "");
-  return `${frontendBase}/menu.html?q=${encodeURIComponent(rawToken)}`;
+function normalizeQrFrontendBase(value = "") {
+  const candidate = String(value || "").split(",")[0].trim();
+  if (!candidate) return "";
+
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
+        ? candidate
+        : "https://" + candidate
+    );
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+      return "";
+    }
+    return parsed.origin.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
 }
 
+function getCanonicalQrUrl(rawToken = "", frontendBaseOverride = "") {
+  const frontendBase =
+    normalizeQrFrontendBase(frontendBaseOverride) ||
+    normalizeQrFrontendBase(env.frontendUrl || process.env.PUBLIC_FRONTEND_URL || "");
+  return frontendBase + "/menu?q=" + encodeURIComponent(rawToken);
+}
 function buildRequestFingerprint(value) {
   return hashSecret(JSON.stringify(value));
 }
