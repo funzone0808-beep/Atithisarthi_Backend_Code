@@ -1,5 +1,6 @@
 const { supabase } = require("./supabase");
 const { env } = require("../config/env");
+const { publishNotificationEvent } = require("./notification-live");
 const nodemailer = require("nodemailer");
 const {
   buildNotificationDedupeKey,
@@ -793,6 +794,8 @@ async function processNotificationEventDeliverySafely(notificationEvent = {}) {
 async function createNotificationEventSafely(input = {}) {
   try {
     const notificationEvent = await createNotificationEvent(input);
+    // The event is persisted before it is published to live dashboard sessions.
+    publishNotificationEvent(notificationEvent);
     const processedEvent = await processNotificationEventDeliverySafely(
       notificationEvent
     );

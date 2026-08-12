@@ -9,6 +9,7 @@ const {
   publicRoomBookingCreateSchema
 } = require("../validators/rooms");
 const { supabase } = require("../utils/supabase");
+const { createNotificationEventSafely } = require("../utils/notifications");
 const {
   getCachedPublicRoutePayload,
   setCachedPublicRoutePayload
@@ -1079,6 +1080,19 @@ router.post(
 
         throw error;
       }
+
+      void createNotificationEventSafely({
+        hotelSlug: data.hotel_slug || slug,
+        sourceType: "room_booking",
+        sourceId: data.id,
+        payload: {
+          bookingId: data.id,
+          source: "website",
+          bookingStatus: data.booking_status || "pending",
+          paymentStatus: data.payment_status || "pending",
+          eventVersion: data.updated_at || data.created_at || ""
+        }
+      });
 
       res.status(201).json({
         success: true,

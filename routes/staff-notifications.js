@@ -1,8 +1,9 @@
-﻿"use strict";
+"use strict";
 
 const express = require("express");
 const { requireStaffAuth } = require("../middleware/require-staff-auth");
 const { supabase } = require("../utils/supabase");
+const { subscribeToNotificationEvents } = require("../utils/notification-live");
 const {
   fetchHotelFeatureConfig,
   isHotelFeatureEnabled
@@ -203,6 +204,26 @@ async function fetchAcknowledgementCursors(context = {}, cardKeys = []) {
   };
 }
 
+router.get("/stream", requireStaffAuth, async (req, res, next) => {
+  try {
+    const context = await getNotificationPermissionContext(req);
+    if (!context.hotelSlug || !context.staffId) {
+      return res.status(403).json({ success: false, message: "Staff notification scope is missing" });
+    }
+
+    res.status(200);
+    res.set({
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Content-Type": "text/event-stream",
+      "X-Accel-Buffering": "no"
+    });
+    res.flushHeaders?.();
+    subscribeToNotificationEvents({ request: req, response: res, context });
+  } catch (error) {
+    next(error);
+  }
+});
 router.get("/summary", requireStaffAuth, async (req, res) => {
   try {
     const context = await getNotificationPermissionContext(req);
