@@ -6,23 +6,43 @@ const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const TARGET_PAGES = [
   {
     pageName: "index.html",
-    requireContactSheetTag: true
+    requireContactSheetTag: true,
+    requirePolicyTags: true
   },
   {
     pageName: "menu.html",
-    requireContactSheetTag: false
+    requireContactSheetTag: false,
+    requirePolicyTags: true
   },
   {
     pageName: "admin.html",
-    requireContactSheetTag: false
+    requireContactSheetTag: false,
+    requirePolicyTags: true
   },
   {
     pageName: "staff-orders.html",
-    requireContactSheetTag: false
+    requireContactSheetTag: false,
+    requirePolicyTags: true
   },
   {
     pageName: "order-tracking.html",
-    requireContactSheetTag: false
+    requireContactSheetTag: false,
+    requirePolicyTags: true
+  },
+  {
+    pageName: "rooms.html",
+    requireContactSheetTag: false,
+    requirePolicyTags: false
+  },
+  {
+    pageName: "kitchen-display.html",
+    requireContactSheetTag: false,
+    requirePolicyTags: false
+  },
+  {
+    pageName: "qr-order-status.html",
+    requireContactSheetTag: false,
+    requirePolicyTags: false
   }
 ];
 
@@ -41,7 +61,7 @@ function addIssue(list, message) {
 function main() {
   const issues = [];
 
-  TARGET_PAGES.forEach(({ pageName, requireContactSheetTag }) => {
+  TARGET_PAGES.forEach(({ pageName, requireContactSheetTag, requirePolicyTags }) => {
     const filePath = path.join(FRONTEND_ROOT, pageName);
     const source = fs.readFileSync(filePath, "utf8");
     const backendMetaValue = extractMetaContent(source, "app-backend-base-url");
@@ -101,36 +121,36 @@ function main() {
       }
     }
 
-    if (orderFallbackMetaValue === null) {
+    if (requirePolicyTags && orderFallbackMetaValue === null) {
       addIssue(
         issues,
         `${pageName} is missing <meta name="app-allow-order-whatsapp-fallback-on-save-failure">.`
       );
-    } else if (orderFallbackMetaValue !== "") {
+    } else if (requirePolicyTags && orderFallbackMetaValue !== "") {
       addIssue(
         issues,
         `${pageName} app-allow-order-whatsapp-fallback-on-save-failure should be blank in the neutral repo state.`
       );
     }
 
-    if (verifiedPaymentWhatsAppMetaValue === null) {
+    if (requirePolicyTags && verifiedPaymentWhatsAppMetaValue === null) {
       addIssue(
         issues,
         `${pageName} is missing <meta name="app-open-whatsapp-after-verified-online-payment">.`
       );
-    } else if (verifiedPaymentWhatsAppMetaValue !== "") {
+    } else if (requirePolicyTags && verifiedPaymentWhatsAppMetaValue !== "") {
       addIssue(
         issues,
         `${pageName} app-open-whatsapp-after-verified-online-payment should be blank in the neutral repo state.`
       );
     }
 
-    if (roomCombinedCheckoutFrontendMetaValue === null) {
+    if (requirePolicyTags && roomCombinedCheckoutFrontendMetaValue === null) {
       addIssue(
         issues,
         `${pageName} is missing <meta name="app-room-combined-checkout-frontend-enabled">.`
       );
-    } else if (roomCombinedCheckoutFrontendMetaValue !== "false") {
+    } else if (requirePolicyTags && roomCombinedCheckoutFrontendMetaValue !== "false") {
       addIssue(
         issues,
         `${pageName} app-room-combined-checkout-frontend-enabled should be false in the neutral repo state.`

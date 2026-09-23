@@ -8,7 +8,10 @@ const TARGET_PAGES = [
   "menu.html",
   "admin.html",
   "staff-orders.html",
-  "order-tracking.html"
+  "order-tracking.html",
+  "rooms.html",
+  "kitchen-display.html",
+  "qr-order-status.html"
 ];
 
 function replaceMetaContent(source, name, value, { required = true } = {}) {

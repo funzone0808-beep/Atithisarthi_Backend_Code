@@ -4,11 +4,14 @@ const path = require("path");
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const TARGET_PAGES = [
-  { pageName: "index.html", requireContactSheetTag: true },
-  { pageName: "menu.html", requireContactSheetTag: false },
-  { pageName: "admin.html", requireContactSheetTag: false },
-  { pageName: "staff-orders.html", requireContactSheetTag: false },
-  { pageName: "order-tracking.html", requireContactSheetTag: false }
+  { pageName: "index.html", requireContactSheetTag: true, requirePolicyTags: true },
+  { pageName: "menu.html", requireContactSheetTag: false, requirePolicyTags: true },
+  { pageName: "admin.html", requireContactSheetTag: false, requirePolicyTags: true },
+  { pageName: "staff-orders.html", requireContactSheetTag: false, requirePolicyTags: true },
+  { pageName: "order-tracking.html", requireContactSheetTag: false, requirePolicyTags: true },
+  { pageName: "rooms.html", requireContactSheetTag: false, requirePolicyTags: false },
+  { pageName: "kitchen-display.html", requireContactSheetTag: false, requirePolicyTags: false },
+  { pageName: "qr-order-status.html", requireContactSheetTag: false, requirePolicyTags: false }
 ];
 const OPTIONAL_BOOLEAN_FLAGS = [
   "app-allow-order-whatsapp-fallback-on-save-failure",
@@ -29,7 +32,7 @@ function main() {
     OPTIONAL_BOOLEAN_FLAGS.map((name) => [name, new Set()])
   );
 
-  TARGET_PAGES.forEach(({ pageName, requireContactSheetTag }) => {
+  TARGET_PAGES.forEach(({ pageName, requireContactSheetTag, requirePolicyTags }) => {
     const source = fs.readFileSync(path.join(FRONTEND_ROOT, pageName), "utf8");
     const backendUrl = extractMetaContent(source, "app-backend-base-url");
     const apiUrl = extractMetaContent(source, "app-api-base-url");
@@ -51,7 +54,7 @@ function main() {
       issues.push(`${pageName} must have a blank app-contact-sheet-url.`);
     }
 
-    OPTIONAL_BOOLEAN_FLAGS.forEach((name) => {
+    if (requirePolicyTags) OPTIONAL_BOOLEAN_FLAGS.forEach((name) => {
       const value = extractMetaContent(source, name);
 
       if (value === null || !["", "true", "false"].includes(value)) {
@@ -62,7 +65,7 @@ function main() {
       observedFlags.get(name).add(value);
     });
 
-    if (roomCheckout !== "false") {
+    if (requirePolicyTags && roomCheckout !== "false") {
       issues.push(
         `${pageName} app-room-combined-checkout-frontend-enabled must remain false in source-safe state.`
       );
