@@ -23,8 +23,8 @@ function assertStagingGuard() {
 }
 
 const hotels = [
-  { hotel_slug: "test-hotel-alpha", hotel_name: "Test Hotel Alpha", is_active: true },
-  { hotel_slug: "test-hotel-beta", hotel_name: "Test Hotel Beta", is_active: true }
+  { slug: "test-hotel-alpha", name: "Test Hotel Alpha", is_active: true },
+  { slug: "test-hotel-beta", name: "Test Hotel Beta", is_active: true }
 ];
 
 async function upsert(supabase, table, rows, onConflict) {
@@ -38,14 +38,15 @@ async function main() {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false }
   });
-  await upsert(supabase, "hotels", hotels, "hotel_slug");
+  await upsert(supabase, "hotels", hotels, "slug");
   await upsert(supabase, "hotel_profiles", hotels.map((hotel) => ({
-    hotel_slug: hotel.hotel_slug,
-    hotel_name: hotel.hotel_name,
-    phone: "+919000000000",
-    email: `${hotel.hotel_slug}@example.invalid`,
-    address: "Synthetic staging address",
-    gst_number: "22AAAAA0000A1Z5"
+    hotel_slug: hotel.slug,
+    hotel_name: hotel.name,
+    contact: {
+      phone: "+919000000000",
+      email: `${hotel.slug}@example.invalid`,
+      address: "Synthetic staging address"
+    }
   })), "hotel_slug");
   console.log("Staging seed completed for Test Hotel Alpha and Test Hotel Beta using synthetic data only.");
 }
