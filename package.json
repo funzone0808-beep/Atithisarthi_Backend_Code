@@ -93,7 +93,12 @@
     "verify:admin-page-production": "node scripts/verify-admin-page-production.js",
     "verify:client-readiness-documentation": "node scripts/verify-client-readiness-documentation.js",
     "verify:dynamic-menu-categories": "node scripts/verify-dynamic-menu-categories.js",
-    "verify:realtime-notifications": "node scripts/verify-realtime-notification-architecture.js"
+    "verify:realtime-notifications": "node scripts/verify-realtime-notification-architecture.js",
+    "audit:database": "node scripts/audit-database-inventory.js",
+    "audit:secrets": "node scripts/scan-secrets.js",
+    "seed:staging": "node scripts/seed-staging.js",
+    "test:golden-pricing": "node scripts/verify-golden-pricing.js",
+    "test:smoke": "node scripts/smoke-staging.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
