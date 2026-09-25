@@ -100,6 +100,10 @@
     "test:golden-pricing": "node scripts/verify-golden-pricing.js",
     "test:payment-hardening": "node --test tests/payment-hardening.test.js",
     "verify:task2b-preflight": "node scripts/verify-task2b-preflight.js",
+    "verify:task2b-duplicate-webhook": "node scripts/verify-task2b-duplicate-webhook-runtime.js",
+    "verify:task2b-idempotency": "node scripts/verify-task2b-idempotency-runtime.js",
+    "verify:task2b-ordering-reconciliation": "node scripts/verify-task2b-ordering-reconciliation-runtime.js",
+    "verify:task2b-worker-recovery": "node scripts/verify-task2b-worker-lease-recovery-runtime.js",
     "test:smoke": "node scripts/smoke-staging.js"
   },
   "dependencies": {

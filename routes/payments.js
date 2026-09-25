@@ -1,4 +1,5 @@
 const express = require("express");
+const { env } = require("../config/env");
 const { supabase } = require("../utils/supabase");
 const { filterEligibleMenuItems } = require("../utils/menu-categories");
 const logger = require("../utils/logger");
@@ -660,7 +661,11 @@ function getPaymentGatewayReadiness() {
     webhook: {
       required: requiresWebhookSecret,
       configured: hasWebhookSecret,
-      endpoint: "/api/payments/webhook"
+      endpoint: "/api/payments/webhook",
+      worker: {
+        enabled: !!env.paymentWebhookWorkerEnabled,
+        intervalMs: env.paymentWebhookWorkerIntervalMs
+      }
     },
     route: {
       transferCreationEnabled: !!config.routeTransfersEnabled,

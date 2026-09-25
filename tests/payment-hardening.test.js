@@ -302,4 +302,5 @@ test("production safety guards remain present", () => {
   assert.match(route, /paymentIntentRequired:\s*true/);
   assert.match(route, /intentBeforeProviderOrder:\s*true/);
   assert.match(route, /finality:\s*"CAPTURED_PROVIDER_EVIDENCE"/);
+  assert.match(route, /worker:\s*\{[\s\S]*enabled:\s*!!env\.paymentWebhookWorkerEnabled[\s\S]*intervalMs:\s*env\.paymentWebhookWorkerIntervalMs/);
 });
