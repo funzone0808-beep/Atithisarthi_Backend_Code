@@ -11,14 +11,20 @@ const {
   paymentVerifySchema
 } = require("../validators/payments");
 const {
-  createPaymentGatewayOrder,
-  fetchPaymentGatewayOrderPayments,
+  getPaymentGatewayAdapter,
   getPaymentGatewayConfig,
   getPaymentGatewaySafetyIssue,
   isPaymentGatewayConfigured,
-  toGatewayMinorAmount,
-  verifyPaymentGatewaySignature
+  toGatewayMinorAmount
 } = require("../utils/payment-gateway");
+const {
+  PaymentIntegrityError,
+  digestJson,
+  parseIdempotencyKey
+} = require("../payments/payment-domain");
+const { PaymentIntentStore, isMissingTask2ASchema } = require("../payments/payment-intent-store");
+const { finalizeProviderPayment } = require("../payments/payment-finalizer");
+const { notifyPaidOrderAfterFinalization } = require("../payments/paid-order-notification");
 const { publicPaymentInitLimiter } = require("../middleware/public-rate-limiters");
 const {
   buildOrderTrackingReference,
@@ -39,6 +45,9 @@ const { validateRequestedMenuCombos } = require("../utils/menu-combos");
 const { resolveTableForOrder } = require("../utils/restaurant-tables");
 
 const router = express.Router();
+const PAYMENT_OPERATION = "FOOD_ORDER_PAYMENT";
+const PAYMENT_HARDENING_RELEASE = "TASK_2A_PAYMENT_INTENT_V1";
+const paymentIntentStore = new PaymentIntentStore(supabase);
 const PAYMENT_GATEWAY_ORDER_COLUMNS = [
   "payment_gateway",
   "gateway_order_id",
@@ -640,6 +649,14 @@ function getPaymentGatewayReadiness() {
     currency: config.currency,
     mode: config.isProduction ? "production" : "test",
     reason,
+    hardening: {
+      release: PAYMENT_HARDENING_RELEASE,
+      paymentIntentRequired: true,
+      intentBeforeProviderOrder: true,
+      idempotencyKeyRequired: true,
+      finality: "CAPTURED_PROVIDER_EVIDENCE",
+      webhookInbox: "DURABLE_LEASED"
+    },
     webhook: {
       required: requiresWebhookSecret,
       configured: hasWebhookSecret,
@@ -650,6 +667,45 @@ function getPaymentGatewayReadiness() {
       transferCreationGate:
         "Requires PAYMENT_ROUTE_TRANSFERS_ENABLED=true and per-hotel routeEnabled=true with acc_ linked account"
     }
+  };
+}
+
+async function getIntentLinkedOrder(intent) {
+  if (!intent?.business_order_id) return null;
+  const { data, error } = await supabase.from("orders")
+    .select("id,hotel_slug,status,payment_status,gateway_status,gateway_order_id,payment_amount,payment_currency,tracking_token")
+    .eq("id", intent.business_order_id).eq("hotel_slug", intent.hotel_slug).maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+function buildIdempotentPaymentResponse(intent, order, fallbackContext = {}) {
+  const context = intent?.context && typeof intent.context === "object" ? intent.context : fallbackContext;
+  return {
+    success: true,
+    idempotent: true,
+    message: "Existing payment initiation returned",
+    paymentIntentId: intent.id,
+    payment: {
+      provider: intent.provider,
+      keyId: getPaymentGatewayConfig().razorpay.keyId,
+      gatewayOrderId: intent.provider_order_id,
+      gatewayStatus: intent.provider_status || String(intent.status || "").toLowerCase(),
+      amount: Number(intent.expected_amount_minor) / 100,
+      amountMinor: Number(intent.expected_amount_minor),
+      currency: intent.currency,
+      receipt: context.receipt || ""
+    },
+    order,
+    tracking: buildOrderTrackingReference(order),
+    trackingReady: !!order?.tracking_token,
+    orderLinked: !!order,
+    orderLinkReason: order ? "existing" : "pending_reconciliation",
+    hotel: context.hotel || { slug: intent.hotel_slug, name: "" },
+    paymentRoute: context.paymentRoute || null,
+    totals: context.totals || null,
+    items: context.items || null,
+    requiresReconciliation: !!intent.requires_reconciliation
   };
 }
 
@@ -1110,6 +1166,15 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       orderContext,
       orderDraft
     } = req.validatedBody;
+    const idempotencyKey = parseIdempotencyKey(req.get("Idempotency-Key"));
+
+    if (!orderDraft) {
+      throw new PaymentIntegrityError(
+        "PAYMENT_ORDER_DRAFT_REQUIRED",
+        "Order details are required before online payment can be initiated.",
+        400
+      );
+    }
 
     const hotelAccess = await ensurePublicHotelAccess(req, res, hotelSlug, {
       notFoundMessage: "Hotel is not available for online payment",
@@ -1206,18 +1271,107 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       amountMinor,
       currency: config.currency
     });
-    const gatewayOrder = await createPaymentGatewayOrder({
-      amount: paymentContext.totals.gatewayAmount,
-      currency: config.currency,
-      receipt,
-      notes: buildPaymentNotes({
+    const adapter = getPaymentGatewayAdapter();
+    const paymentNotes = buildPaymentNotes({
         hotelSlug,
         orderContext: safeOrderContext,
         itemCount: paymentContext.items.length,
         paymentRouteSettings
-      }),
-      transfers: paymentRouteTransfer.transfers
+      });
+    const intentContext = {
+      receipt,
+      hotel: { slug: paymentContext.hotel.hotel_slug, name: paymentContext.hotel.hotel_name || "" },
+      totals: paymentContext.totals,
+      items: paymentContext.items,
+      paymentMethod: getGatewayPaymentMethodLabel(paymentMethod),
+      orderContext: safeOrderContext,
+      paymentRoute: {
+        provider: paymentRouteSettings.provider,
+        routeEnabled: paymentRouteSettings.routeEnabled,
+        routeReady: paymentRouteSettings.routeReady,
+        routeStatus: paymentRouteSettings.routeStatus,
+        transferStatus: paymentRouteTransfer.transferStatus,
+        transferRequested: paymentRouteTransfer.transferAllowed
+      }
+    };
+    const requestDigest = digestJson({
+      hotelSlug, operation: PAYMENT_OPERATION, paymentMethod,
+      amountMinor, currency: config.currency, items: paymentContext.items,
+      orderContext: safeOrderContext, orderDraft
     });
+    const intentResult = await paymentIntentStore.createOrReuse({
+      hotelSlug, operation: PAYMENT_OPERATION, provider: adapter.provider,
+      merchantRef: adapter.merchantRef, credentialRef: adapter.credentialRef,
+      expectedAmountMinor: amountMinor, currency: config.currency,
+      idempotencyKey, requestDigest, context: intentContext
+    });
+    let paymentIntent = intentResult.intent;
+
+    if (intentResult.reused) {
+      const existingOrder = await getIntentLinkedOrder(paymentIntent);
+      if (paymentIntent.provider_order_id || paymentIntent.provider_creation_started_at) {
+        return res.status(paymentIntent.provider_order_id ? 200 : 202)
+          .json(buildIdempotentPaymentResponse(paymentIntent, existingOrder, intentContext));
+      }
+    }
+
+    paymentIntent = await paymentIntentStore.claimProviderCreation(paymentIntent.id);
+    if (paymentIntent.provider_order_id || paymentIntent.requires_reconciliation) {
+      const existingOrder = await getIntentLinkedOrder(paymentIntent);
+      return res.status(paymentIntent.provider_order_id ? 200 : 202)
+        .json(buildIdempotentPaymentResponse(paymentIntent, existingOrder, intentContext));
+    }
+
+    let gatewayOrder;
+    try {
+      gatewayOrder = await adapter.createPaymentOrder({
+        amountMinor, currency: config.currency, receipt, notes: paymentNotes,
+        transfers: paymentRouteTransfer.transfers
+      });
+    } catch (providerError) {
+      if (providerError?.uncertain || providerError?.code === "PROVIDER_TIMEOUT") {
+        paymentIntent = await paymentIntentStore.markReconciliationRequired(
+          paymentIntent.id, providerError.code, providerError.message
+        );
+        return res.status(202).json({
+          success: true,
+          pending: true,
+          paymentIntentId: paymentIntent.id,
+          requiresReconciliation: true,
+          message: "Payment initiation outcome is being reconciled. Do not submit another payment."
+        });
+      }
+      throw providerError;
+    }
+    try {
+      paymentIntent = await paymentIntentStore.attachProviderOrder(
+        paymentIntent.id, gatewayOrder.gatewayOrderId, null
+      );
+    } catch (attachError) {
+      logger.error("Provider order created but local intent attachment failed", {
+        ...paymentLogMeta,
+        paymentIntentId: paymentIntent.id,
+        gatewayOrderId: gatewayOrder.gatewayOrderId,
+        paymentStage: "provider_order_attach",
+        errorCode: attachError.code || "PROVIDER_ORDER_ATTACH_FAILED"
+      });
+      try {
+        await paymentIntentStore.markReconciliationRequired(
+          paymentIntent.id, "PROVIDER_ORDER_ATTACH_FAILED", attachError.message
+        );
+      } catch {
+        // provider_creation_started_at remains the durable no-retry guard even
+        // when the database cannot accept the reconciliation marker.
+      }
+      return res.status(202).json({
+        success: true,
+        pending: true,
+        paymentIntentId: paymentIntent.id,
+        gatewayOrderId: gatewayOrder.gatewayOrderId,
+        requiresReconciliation: true,
+        message: "Payment order creation requires reconciliation. Do not retry payment."
+      });
+    }
     const pendingOrder = await createPendingGatewayLinkedOrder({
       hotelSlug,
       paymentMethod,
@@ -1233,10 +1387,24 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
         gatewayOrderId: gatewayOrder.gatewayOrderId
       })
     });
+    if (!pendingOrder.created || !pendingOrder.order?.id) {
+      await paymentIntentStore.markReconciliationRequired(
+        paymentIntent.id, "LOCAL_ORDER_LINK_FAILED", pendingOrder.reason
+      );
+      return res.status(202).json({
+        success: true, pending: true, paymentIntentId: paymentIntent.id,
+        gatewayOrderId: gatewayOrder.gatewayOrderId, requiresReconciliation: true,
+        message: "Payment order was created and is awaiting safe local reconciliation. Do not retry payment."
+      });
+    }
+    paymentIntent = await paymentIntentStore.attachProviderOrder(
+      paymentIntent.id, gatewayOrder.gatewayOrderId, String(pendingOrder.order.id)
+    );
 
     res.status(201).json({
       success: true,
       message: "Payment order created",
+      paymentIntentId: paymentIntent.id,
       payment: {
         provider: gatewayOrder.provider,
         keyId: gatewayOrder.keyId,
@@ -1268,6 +1436,16 @@ router.post("/init", publicPaymentInitLimiter, validateBody(paymentInitSchema), 
       items: paymentContext.items
     });
   } catch (error) {
+    if (error instanceof PaymentIntegrityError) {
+      return res.status(error.httpStatus).json({ success: false, code: error.code, message: error.message });
+    }
+    if (isMissingTask2ASchema(error)) {
+      return res.status(503).json({
+        success: false,
+        code: "PAYMENT_HARDENING_SCHEMA_NOT_READY",
+        message: "Online payment hardening schema is not ready. Payment was not initiated."
+      });
+    }
     if (isActiveTableOrderConflict(error)) {
       return res.status(409).json({
         success: false,
@@ -1302,6 +1480,7 @@ router.post("/verify", validateBody(paymentVerifySchema), async (req, res) => {
     }
 
     const {
+      paymentIntentId = "",
       hotelSlug = "",
       orderId = "",
       gatewayOrderId,
@@ -1328,7 +1507,8 @@ router.post("/verify", validateBody(paymentVerifySchema), async (req, res) => {
       }
     }
 
-    const isVerified = verifyPaymentGatewaySignature({
+    const adapter = getPaymentGatewayAdapter();
+    const isVerified = adapter.verifyCheckoutEvidence({
       gatewayOrderId,
       gatewayPaymentId,
       gatewaySignature
@@ -1346,30 +1526,70 @@ router.post("/verify", validateBody(paymentVerifySchema), async (req, res) => {
       });
     }
 
-    const orderUpdate = await markLinkedOrderPaidFromVerifiedGateway({
+    const paymentIntent = await paymentIntentStore.findForVerification({
+      intentId: paymentIntentId,
       hotelSlug,
-      orderId,
-      gatewayOrderId,
-      gatewayPaymentId,
-      gatewaySignature
+      businessOrderId: orderId,
+      providerOrderId: gatewayOrderId
     });
+    if (!paymentIntent) {
+      throw new PaymentIntegrityError(
+        "PAYMENT_INTENT_NOT_FOUND",
+        "A durable payment intent is required before payment can be finalized.",
+        409
+      );
+    }
+    const { evidence: providerEvidence, finalization } = await finalizeProviderPayment({
+      intent: paymentIntent, paymentId: gatewayPaymentId, adapter,
+      store: paymentIntentStore, source: "CHECKOUT_VERIFY",
+      evidenceContext: { gatewayOrderId, gatewayPaymentId }
+    });
+    const finalizedOrder = await getIntentLinkedOrder(paymentIntent);
+    if (finalization?.orderUpdated) {
+      void notifyPaidOrderAfterFinalization({ db: supabase, intent: paymentIntent });
+    }
 
     res.json({
       success: true,
-      message: orderUpdate.updated
+      message: finalization?.orderUpdated
         ? "Payment verified and order marked paid"
         : "Payment verified",
+      paymentIntentId: paymentIntent.id,
       payment: {
-        provider: getPaymentGatewayConfig().provider,
+        provider: adapter.provider,
         gatewayOrderId,
         gatewayPaymentId,
-        verified: true
+        verified: true,
+        captured: true,
+        status: providerEvidence.status,
+        amountMinor: providerEvidence.amountMinor,
+        currency: providerEvidence.currency
       },
-      orderUpdated: orderUpdate.updated,
-      orderUpdateReason: orderUpdate.reason,
-      order: orderUpdate.order || null
+      orderUpdated: !!finalization?.orderUpdated,
+      orderUpdateReason: finalization?.idempotent ? "already_paid_same_payment" : "captured_and_bound",
+      order: finalizedOrder
     });
   } catch (error) {
+    if (error instanceof PaymentIntegrityError) {
+      logger.warn("Payment finality validation rejected", {
+        ...paymentLogMeta, paymentStage: "verify", verifyResult: error.code
+      });
+      return res.status(error.httpStatus).json({
+        success: false, code: error.code, message: error.message
+      });
+    }
+    if (isMissingTask2ASchema(error)) {
+      return res.status(503).json({
+        success: false, code: "PAYMENT_HARDENING_SCHEMA_NOT_READY",
+        message: "Payment verification is unavailable until the hardening schema is ready."
+      });
+    }
+    if (error?.code === "PROVIDER_TIMEOUT") {
+      return res.status(503).json({
+        success: false, code: "PROVIDER_STATUS_UNKNOWN",
+        message: "Payment status could not be confirmed. It remains pending reconciliation."
+      });
+    }
     logger.error("Payment verify error", {
       ...paymentLogMeta,
       paymentStage: "verify",
@@ -1396,6 +1616,7 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
     }
 
     const {
+      paymentIntentId = "",
       hotelSlug,
       orderId,
       gatewayOrderId
@@ -1417,38 +1638,52 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
       return;
     }
 
-    const paymentStatus = await fetchPaymentGatewayOrderPayments(gatewayOrderId);
-    const capturedPayment = findCapturedGatewayPayment(paymentStatus.payments);
+    const adapter = getPaymentGatewayAdapter();
+    const paymentIntent = await paymentIntentStore.findForVerification({
+      intentId: paymentIntentId, hotelSlug, businessOrderId: orderId, providerOrderId: gatewayOrderId
+    });
+    if (!paymentIntent) {
+      throw new PaymentIntegrityError(
+        "PAYMENT_INTENT_NOT_FOUND",
+        "A durable payment intent is required for reconciliation.",
+        409
+      );
+    }
+    const providerPayments = await adapter.getOrderPayments(gatewayOrderId);
+    const capturedPayment = findCapturedGatewayPayment(providerPayments);
 
     if (capturedPayment) {
-      const orderUpdate = await markLinkedOrderPaidFromVerifiedGateway({
-        hotelSlug,
-        orderId,
-        gatewayOrderId,
-        gatewayPaymentId: capturedPayment.id || "",
-        gatewaySignature: ""
+      const { evidence: providerEvidence, finalization } = await finalizeProviderPayment({
+        intent: paymentIntent, paymentId: capturedPayment.id || "", adapter,
+        store: paymentIntentStore, source: "RECONCILIATION",
+        evidenceContext: { gatewayOrderId }
       });
+      const order = await getIntentLinkedOrder(paymentIntent);
+      if (finalization?.orderUpdated) {
+        void notifyPaidOrderAfterFinalization({ db: supabase, intent: paymentIntent });
+      }
 
       return res.json({
         success: true,
-        message: orderUpdate.updated
+        message: finalization?.orderUpdated
           ? "Payment reconciled and order marked paid"
           : "Payment reconciled",
+        paymentIntentId: paymentIntent.id,
         payment: {
-          provider: paymentStatus.provider,
+          provider: adapter.provider,
           gatewayOrderId,
-          gatewayPaymentId: capturedPayment.id || "",
-          status: capturedPayment.status || "captured",
+          gatewayPaymentId: providerEvidence.providerPaymentId,
+          status: providerEvidence.status,
           captured: true,
           reconciled: true
         },
-        orderUpdated: orderUpdate.updated,
-        orderUpdateReason: orderUpdate.reason,
-        order: orderUpdate.order || null
+        orderUpdated: !!finalization?.orderUpdated,
+        orderUpdateReason: finalization?.idempotent ? "already_paid_same_payment" : "captured_and_bound",
+        order
       });
     }
 
-    const failedPayment = findFailedGatewayPayment(paymentStatus.payments);
+    const failedPayment = findFailedGatewayPayment(providerPayments);
 
     if (failedPayment) {
       const orderUpdate = await markLinkedOrderPaymentFailed({
@@ -1468,7 +1703,7 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
           ? "Payment failure reconciled"
           : "Payment status reconciled",
         payment: {
-          provider: paymentStatus.provider,
+          provider: adapter.provider,
           gatewayOrderId,
           gatewayPaymentId: failedPayment.id || "",
           status: failedPayment.status || "failed",
@@ -1485,7 +1720,7 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
       success: true,
       message: "Payment is not captured yet",
       payment: {
-        provider: paymentStatus.provider,
+        provider: adapter.provider,
         gatewayOrderId,
         status: "pending",
         captured: false,
@@ -1496,6 +1731,15 @@ router.post("/reconcile", validateBody(paymentReconcileSchema), async (req, res)
       order: null
     });
   } catch (error) {
+    if (error instanceof PaymentIntegrityError) {
+      return res.status(error.httpStatus).json({ success: false, code: error.code, message: error.message });
+    }
+    if (error?.code === "PROVIDER_TIMEOUT") {
+      return res.status(503).json({
+        success: false, code: "PROVIDER_STATUS_UNKNOWN",
+        message: "Payment status remains pending reconciliation."
+      });
+    }
     logger.error("Payment reconcile error", {
       ...paymentLogMeta,
       paymentStage: "reconcile",

@@ -98,6 +98,8 @@
     "audit:secrets": "node scripts/scan-secrets.js",
     "seed:staging": "node scripts/seed-staging.js",
     "test:golden-pricing": "node scripts/verify-golden-pricing.js",
+    "test:payment-hardening": "node --test tests/payment-hardening.test.js",
+    "verify:task2b-preflight": "node scripts/verify-task2b-preflight.js",
     "test:smoke": "node scripts/smoke-staging.js"
   },
   "dependencies": {

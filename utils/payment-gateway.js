@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { env } = require("../config/env");
 
 const SUPPORTED_PAYMENT_GATEWAYS = ["razorpay"];
+const { LEGACY_RAZORPAY_MERCHANT_REF } = require("../payments/payment-domain");
 
 function normalizeProvider(value = "") {
   const provider = String(value || "").trim().toLowerCase();
@@ -21,9 +22,35 @@ function getPaymentGatewayConfig() {
       keyId: env.razorpayKeyId || "",
       keySecret: env.razorpayKeySecret || "",
       webhookSecret: env.razorpayWebhookSecret || "",
-      apiBaseUrl: String(env.razorpayApiBaseUrl || "https://api.razorpay.com/v1").replace(/\/$/, "")
+      apiBaseUrl: String(env.razorpayApiBaseUrl || "https://api.razorpay.com/v1").replace(/\/$/, ""),
+      timeoutMs: Number.isFinite(env.paymentGatewayTimeoutMs) && env.paymentGatewayTimeoutMs > 0
+        ? env.paymentGatewayTimeoutMs
+        : 10000
     }
   };
+}
+
+function getCredentialRef(keyId = "") {
+  const fingerprint = crypto.createHash("sha256").update(String(keyId || "")).digest("hex").slice(0, 12);
+  return `RAZORPAY_KEY_${fingerprint || "UNCONFIGURED"}`;
+}
+
+async function fetchWithProviderTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error("Payment provider request outcome is unknown");
+      timeoutError.code = "PROVIDER_TIMEOUT";
+      timeoutError.uncertain = true;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function getPaymentGatewaySafetyIssue(config = getPaymentGatewayConfig()) {
@@ -154,7 +181,7 @@ async function createRazorpayOrder({ amount, currency, receipt, notes, transfers
     requestBody.partial_payment = false;
   }
 
-  const response = await fetch(`${config.razorpay.apiBaseUrl}/orders`, {
+  const response = await fetchWithProviderTimeout(`${config.razorpay.apiBaseUrl}/orders`, {
     method: "POST",
     headers: {
       Authorization: buildRazorpayAuthHeader(
@@ -164,7 +191,7 @@ async function createRazorpayOrder({ amount, currency, receipt, notes, transfers
       "Content-Type": "application/json"
     },
     body: JSON.stringify(requestBody)
-  });
+  }, config.razorpay.timeoutMs);
 
   const data = await response.json().catch(() => ({}));
 
@@ -175,6 +202,8 @@ async function createRazorpayOrder({ amount, currency, receipt, notes, transfers
 
   return {
     provider: "razorpay",
+    merchantRef: LEGACY_RAZORPAY_MERCHANT_REF,
+    credentialRef: getCredentialRef(config.razorpay.keyId),
     keyId: config.razorpay.keyId,
     gatewayOrderId: data.id,
     gatewayStatus: data.status || "created",
@@ -198,7 +227,7 @@ async function fetchRazorpayOrderPayments(gatewayOrderId = "") {
     throw new Error("Gateway order id is required");
   }
 
-  const response = await fetch(
+  const response = await fetchWithProviderTimeout(
     `${config.razorpay.apiBaseUrl}/orders/${encodeURIComponent(orderId)}/payments`,
     {
       method: "GET",
@@ -208,7 +237,8 @@ async function fetchRazorpayOrderPayments(gatewayOrderId = "") {
           config.razorpay.keySecret
         )
       }
-    }
+    },
+    config.razorpay.timeoutMs
   );
   const data = await response.json().catch(() => ({}));
 
@@ -221,6 +251,42 @@ async function fetchRazorpayOrderPayments(gatewayOrderId = "") {
     provider: "razorpay",
     gatewayOrderId: orderId,
     payments: Array.isArray(data.items) ? data.items : [],
+    raw: data
+  };
+}
+
+async function fetchRazorpayPayment(gatewayPaymentId = "") {
+  const config = getPaymentGatewayConfig();
+  assertPaymentGatewayConfigured();
+  const paymentId = String(gatewayPaymentId || "").trim();
+  if (!paymentId) throw new Error("Gateway payment id is required");
+  const response = await fetchWithProviderTimeout(
+    `${config.razorpay.apiBaseUrl}/payments/${encodeURIComponent(paymentId)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: buildRazorpayAuthHeader(config.razorpay.keyId, config.razorpay.keySecret)
+      }
+    },
+    config.razorpay.timeoutMs
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = data?.error?.description || data?.message || "Failed to fetch payment status";
+    const error = new Error(message);
+    error.code = "PROVIDER_LOOKUP_FAILED";
+    throw error;
+  }
+  return {
+    provider: "razorpay",
+    merchantRef: LEGACY_RAZORPAY_MERCHANT_REF,
+    credentialRef: getCredentialRef(config.razorpay.keyId),
+    providerOrderId: String(data.order_id || ""),
+    providerPaymentId: String(data.id || paymentId),
+    amountMinor: Number(data.amount),
+    currency: String(data.currency || "").toUpperCase(),
+    status: String(data.status || "").toLowerCase(),
+    captured: data.captured === true || String(data.status || "").toLowerCase() === "captured",
     raw: data
   };
 }
@@ -308,12 +374,32 @@ function verifyPaymentGatewaySignature(payload = {}) {
   return false;
 }
 
+function getPaymentGatewayAdapter() {
+  const config = getPaymentGatewayConfig();
+  if (config.provider !== "razorpay") throw new Error("Unsupported payment gateway provider");
+  return {
+    provider: "razorpay",
+    merchantRef: LEGACY_RAZORPAY_MERCHANT_REF,
+    credentialRef: getCredentialRef(config.razorpay.keyId),
+    createPaymentOrder: ({ amountMinor, amount, ...rest }) => createRazorpayOrder({
+      ...rest,
+      amount: amount ?? Number(amountMinor) / 100
+    }),
+    getPaymentStatus: fetchRazorpayPayment,
+    getOrderPayments: async (orderId) => (await fetchRazorpayOrderPayments(orderId)).payments,
+    verifyCheckoutEvidence: verifyRazorpaySignature,
+    verifyWebhook: verifyRazorpayWebhookSignature
+  };
+}
+
 module.exports = {
   getPaymentGatewayConfig,
   getPaymentGatewaySafetyIssue,
   isPaymentGatewayConfigured,
   createPaymentGatewayOrder,
+  fetchRazorpayPayment,
   fetchPaymentGatewayOrderPayments,
+  getPaymentGatewayAdapter,
   verifyPaymentGatewaySignature,
   verifyRazorpayWebhookSignature,
   toGatewayMinorAmount

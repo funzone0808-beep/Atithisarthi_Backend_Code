@@ -9,6 +9,10 @@ const { env } = require("./config/env");
 const logger = require("./utils/logger");
 const { startQrOutboxWorker, stopQrOutboxWorker } = require("./utils/qr-outbox");
 const {
+  startPaymentWebhookWorker,
+  stopPaymentWebhookWorker
+} = require("./workers/payment-webhook-worker");
+const {
   attachRequestContext,
   logRequestLifecycle
 } = require("./middleware/request-observability");
@@ -364,9 +368,11 @@ try {
       nodeEnv: env.nodeEnv
     });
     startQrOutboxWorker();
+    startPaymentWebhookWorker();
   });
   const shutdown = () => {
     stopQrOutboxWorker();
+    stopPaymentWebhookWorker();
     server.close(() => process.exit(0));
   };
   process.once("SIGTERM", shutdown);

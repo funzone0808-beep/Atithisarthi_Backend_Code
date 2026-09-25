@@ -35,6 +35,7 @@ const paymentOrderIdSchema = z.union([
 ]);
 
 const paymentVerifySchema = z.object({
+  paymentIntentId: z.string().uuid().optional(),
   hotelSlug: z.string().trim().min(1).max(120).optional(),
   orderId: paymentOrderIdSchema.optional(),
   gatewayOrderId: z.string().trim().min(1).max(200),
@@ -49,6 +50,7 @@ const paymentVerifySchema = z.object({
 );
 
 const paymentReconcileSchema = z.object({
+  paymentIntentId: z.string().uuid().optional(),
   hotelSlug: z.string().trim().min(1).max(120),
   orderId: paymentOrderIdSchema,
   gatewayOrderId: z.string().trim().min(1).max(200)

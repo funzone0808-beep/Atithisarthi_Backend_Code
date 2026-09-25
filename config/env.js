@@ -51,6 +51,10 @@ port: Number(getEnv("PORT", "10000")),
   razorpayKeySecret: getEnv("RAZORPAY_KEY_SECRET", ""),
   razorpayWebhookSecret: getEnv("RAZORPAY_WEBHOOK_SECRET", ""),
   razorpayApiBaseUrl: getEnv("RAZORPAY_API_BASE_URL", "https://api.razorpay.com/v1"),
+  paymentGatewayTimeoutMs: Number(getEnv("PAYMENT_GATEWAY_TIMEOUT_MS", "10000")),
+  paymentWebhookWorkerEnabled:
+    getEnv("PAYMENT_WEBHOOK_WORKER_ENABLED", "false") === "true",
+  paymentWebhookWorkerIntervalMs: Number(getEnv("PAYMENT_WEBHOOK_WORKER_INTERVAL_MS", "5000")),
 
   isProduction: getEnv("NODE_ENV", "development") === "production",
   isDevelopment: getEnv("NODE_ENV", "development") === "development"
