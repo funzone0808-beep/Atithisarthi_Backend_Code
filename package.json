@@ -104,6 +104,7 @@
     "verify:task2b-idempotency": "node scripts/verify-task2b-idempotency-runtime.js",
     "verify:task2b-ordering-reconciliation": "node scripts/verify-task2b-ordering-reconciliation-runtime.js",
     "verify:task2b-worker-recovery": "node scripts/verify-task2b-worker-lease-recovery-runtime.js",
+    "verify:task2b-verify-then-webhook": "node scripts/verify-task2b-verify-then-webhook-runtime.js",
     "test:smoke": "node scripts/smoke-staging.js"
   },
   "dependencies": {
